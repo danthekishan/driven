@@ -14,6 +14,9 @@ from driven.harness.types import (
     CallToolAction,
     AssistantSaid,
     ObservationEvent,
+    RunStarted,
+    StepAdvanced,
+    RunEnded,
 )
 
 
@@ -37,9 +40,16 @@ class Harness:
     async def run(self, run_id: str, input: list[Message] = []):
         state = await self.state_manager.load(run_id, input)
 
+        # Emit run start
+        if self.emitter:
+            await self.emitter.emit(RunStarted(run_id=run_id))
+
         while True:
             # Step increment inside harness per current design
             state.step += 1
+            # Emit step advanced
+            if self.emitter:
+                await self.emitter.emit(StepAdvanced(step=state.step))
 
             # Controller decides a sequence of actions, with dynamic tool access
             actions = await self.controller.decide(
@@ -75,4 +85,6 @@ class Harness:
             await self.state_manager.save(state)
 
             if state.done:
+                if self.emitter:
+                    await self.emitter.emit(RunEnded(run_id=run_id, reason="done"))
                 return state

@@ -54,7 +54,26 @@ class ToolFailed:
 
 
 ObservationEvent = Union[AssistantSaid, ToolProduced, ToolFailed]
-AnyEvent = Union[ActionEvent, ObservationEvent]
+
+
+# ---------- Lifecycle/Telemetry Events (Emitter-only) ----------
+@dataclass(frozen=True)
+class RunStarted:
+    run_id: str
+
+
+@dataclass(frozen=True)
+class StepAdvanced:
+    step: int
+
+
+@dataclass(frozen=True)
+class RunEnded:
+    run_id: str
+    reason: Literal["done", "stopped"] = "done"
+
+
+AnyEvent = Union[ActionEvent, ObservationEvent, RunStarted, StepAdvanced, RunEnded]
 
 
 # ---------- LLM contracts ----------
