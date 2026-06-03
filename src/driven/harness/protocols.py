@@ -3,26 +3,30 @@ from typing import (
     Optional,
     Protocol,
     runtime_checkable,
+    Callable,
+    Union,
+    Sequence,
 )
 
 from driven.harness.types import (
     LlmToolFunction,
     Message,
-    Observation,
     AgentState,
-    AgentEvent,
     LlmInput,
     LlmTextDelta,
     LlmStructuredResponse,
     LlmTextResponse,
     LlmOutput,
-    Action,
+    ActionEvent,
+    ObservationEvent,
+    CallToolAction,
+    AnyEvent,
 )
 
 
 @runtime_checkable
 class Emitter(Protocol):
-    async def emit(self, event: AgentEvent) -> None: ...
+    async def emit(self, events: Union[AnyEvent, Sequence[AnyEvent]]) -> None: ...
 
 
 @runtime_checkable
@@ -33,7 +37,11 @@ class StateManager(Protocol):
 
 @runtime_checkable
 class Reducer(Protocol):
-    async def apply(self, state: AgentState, event: AgentEvent) -> AgentState: ...
+    async def apply(
+        self,
+        state: AgentState,
+        events: Union[ObservationEvent, Sequence[ObservationEvent]],
+    ) -> AgentState: ...
 
 
 @runtime_checkable
@@ -55,26 +63,21 @@ class Runtime(Protocol):
     def get_tools(self, *args, **kwargs) -> list[LlmToolFunction]: ...
     async def execute(
         self,
-        action: Action,
+        action: CallToolAction,
         state: AgentState,
         llm: Llm,
         sink: Optional[Emitter] = None,
-    ) -> tuple[Observation, list[Message]]: ...
+    ) -> list[ObservationEvent]: ...
 
 
 @runtime_checkable
 class Controller(Protocol):
-    """Decides the next action given the current state.
-
-    Implementations may wrap an LLM (LLMController), a scripted list (ScriptedController),
-    or a human-in-the-loop controller. The harness does not construct tool lists or schemas;
-    that is up to the Controller implementation.
-    """
+    """Decides the next action(s) given the current state."""
 
     async def decide(
         self,
         messages: list[Message],
-        tools: list[LlmToolFunction],
+        get_tools: Callable[..., list[LlmToolFunction]],
         llm: Llm,
         sink: Optional[Emitter] = None,
-    ) -> tuple[Action, list[Message]]: ...
+    ) -> list[ActionEvent]: ...

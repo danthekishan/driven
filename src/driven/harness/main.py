@@ -9,12 +9,11 @@ from driven.harness.protocols import (
     Reducer,
 )
 from driven.harness.types import (
-    AgentEvent,
-    ActionEventPayload,
-    EventType,
-    GenericEventPayload,
     Message,
-    ObservationEventPayload,
+    RespondAction,
+    CallToolAction,
+    AssistantSaid,
+    ObservationEvent,
 )
 
 
@@ -39,48 +38,39 @@ class Harness:
         state = await self.state_manager.load(run_id, input)
 
         while True:
-            step_event = AgentEvent(
-                GenericEventPayload(type=EventType.STEP_STARTED, data={})
-            )
-            # Emit externally (if provided) then reduce
-            if self.emitter:
-                await self.emitter.emit(step_event)
-            state = await self.reducer.apply(state, step_event)
+            # Step increment inside harness per current design
+            state.step += 1
 
-            # Fetch tools for this step (dynamic)
-            tools = self.runtime.get_tools()
-
-            # request
-            action, agent_messages = await self.controller.decide(
+            # Controller decides a sequence of actions, with dynamic tool access
+            actions = await self.controller.decide(
                 messages=state.messages,
-                tools=tools,
+                get_tools=self.runtime.get_tools,
                 llm=self.llm,
                 sink=self.emitter,
             )
 
-            action_event = AgentEvent(
-                payload=ActionEventPayload(action=action, agent_messages=agent_messages)
-            )
-            if self.emitter:
-                await self.emitter.emit(action_event)
-            state = await self.reducer.apply(state, action_event)
+            # Execute actions and reduce observations
+            for action in actions:
+                if self.emitter:
+                    await self.emitter.emit(action)
 
-            # execution
-            observation, tool_messages = await self.runtime.execute(
-                action=action,
-                state=state,
-                llm=self.llm,
-                sink=self.emitter,
-            )
+                observations: list[ObservationEvent]
 
-            obs_event = AgentEvent(
-                ObservationEventPayload(
-                    observation=observation, tool_messages=tool_messages
-                )
-            )
-            if self.emitter:
-                await self.emitter.emit(obs_event)
-            state = await self.reducer.apply(state, obs_event)
+                if isinstance(action, RespondAction):
+                    observations = [AssistantSaid(content=action.content)]
+                elif isinstance(action, CallToolAction):
+                    observations = await self.runtime.execute(
+                        action=action,
+                        state=state,
+                        llm=self.llm,
+                        sink=self.emitter,
+                    )
+                else:
+                    raise RuntimeError(f"Unknown action type: {type(action)}")
+
+                if self.emitter:
+                    await self.emitter.emit(observations)
+                state = await self.reducer.apply(state, observations)
 
             await self.state_manager.save(state)
 

@@ -1,12 +1,5 @@
 from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import (
-    NamedTuple,
-    Any,
-    Literal,
-    Optional,
-    Union,
-)
+from typing import Any, Literal, Optional, Union
 
 Role = Literal["system", "user", "assistant", "tool"]
 
@@ -26,128 +19,45 @@ class Message:
     system: Optional[str] = None
 
 
-# ---------- Actions decided by the controller ----------
+# ---------- ActionEvents (from Controller) ----------
 @dataclass(frozen=True)
 class RespondAction:
     content: str
-    kind: Literal["say"] = field(default="say")
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class CallToolAction:
-    tool_name: str
-    kind: Literal["call_tool"] = field(default="call_tool")
+    name: str
     arguments: dict[str, JSONValue] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-Action = Union[RespondAction, CallToolAction]
+ActionEvent = Union[RespondAction, CallToolAction]
 
 
-# ---------- Observations (results surfaced back into state) ----------
+# ---------- ObservationEvents (to Reducer) ----------
 @dataclass(frozen=True)
-class Observation:
-    data: Any
-    kind: Literal["tool_result", "ask_answer", "error"]
-    metadata: dict[str, Any] = field(default_factory=dict)
+class AssistantSaid:
+    content: str
 
 
-# ---------- Events for realtime emit ----------
-
-# ==========================================
-# 1. Define the NamedTuple Schemas
-# ==========================================
-
-
-class EventType(Enum):
-    LLM_STARTED = auto()
-    LLM_ERROR = auto()
-    LLM_ENDED = auto()
-    LLM_USAGE = auto()
-    LLM_THINK = auto()
-
-    TOOL_CALL_STARTED = auto()
-    TOOL_CALL_ERROR = auto()
-    TOOL_CALL_ENDED = auto()
-
-    ACTION_DECIDED = auto()
-    OBSERVATION_RECEIVED = auto()
-
-    STEP_STARTED = auto()
+@dataclass(frozen=True)
+class ToolProduced:
+    tool_name: str
+    content: JSONValue
 
 
-class LlmRequestEventPayload(NamedTuple):
-    type: Literal[EventType.LLM_STARTED, EventType.TOOL_CALL_STARTED]
-    op_type: Literal["tool", "generate"]
-    model: str
-    prompt: str
-    extra: dict
+@dataclass(frozen=True)
+class ToolFailed:
+    tool_name: str
+    error_type: str
+    message: str
 
 
-class LlmResponseEventPayload(NamedTuple):
-    type: Literal[EventType.LLM_THINK, EventType.LLM_ENDED, EventType.TOOL_CALL_ENDED]
-    model: str
-    prompt: str
-    op_type: Literal["tool", "generate", "think"]
-    response: dict[str, Any]
-    extra: dict
+ObservationEvent = Union[AssistantSaid, ToolProduced, ToolFailed]
+AnyEvent = Union[ActionEvent, ObservationEvent]
 
 
-class LlmErrorEventPayload(NamedTuple):
-    model: str
-    error_message: str
-    status_code: int
-    op_type: Literal["tool", "generate"]
-    type: Literal[EventType.LLM_ERROR, EventType.TOOL_CALL_ERROR]
-    extra: dict
-
-
-class UsageEventPayload(NamedTuple):
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-    type: Literal[EventType.LLM_USAGE] = EventType.LLM_USAGE
-
-
-class ActionEventPayload(NamedTuple):
-    action: Action
-    agent_messages: list[Message]
-    type: Literal[EventType.ACTION_DECIDED] = EventType.ACTION_DECIDED
-
-
-class ObservationEventPayload(NamedTuple):
-    observation: Observation
-    tool_messages: list[Message]
-    type: Literal[EventType.OBSERVATION_RECEIVED] = EventType.OBSERVATION_RECEIVED
-
-
-class GenericEventPayload(NamedTuple):
-    type: Literal[EventType.STEP_STARTED]
-    data: dict[str, Any]
-
-
-EventTypesPayload = Union[
-    LlmRequestEventPayload,
-    LlmResponseEventPayload,
-    LlmErrorEventPayload,
-    UsageEventPayload,
-    ActionEventPayload,
-    ObservationEventPayload,
-    GenericEventPayload,
-]
-
-
-@dataclass
-class AgentEvent:
-    payload: EventTypesPayload
-
-    @property
-    def type(self) -> EventType:
-        return self.payload.type
-
-
-# ---------- Llm ----------
+# ---------- LLM contracts ----------
 @dataclass
 class LlmToolFunction:
     """Represents a tool/function exposed to an Llm."""
@@ -194,7 +104,6 @@ class LlmInput:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-# Non-streaming text
 @dataclass
 class LlmTextResponse:
     content: str
@@ -203,14 +112,12 @@ class LlmTextResponse:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-# Streaming text delta
 @dataclass
 class LlmTextDelta:
     text: str
     usage: Optional[Usage] = None
 
 
-# Structured output (non-streaming)
 @dataclass
 class LlmStructuredResponse:
     data: JSONValue
@@ -219,7 +126,6 @@ class LlmStructuredResponse:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-# Tool calling (non-streaming) one-of
 @dataclass
 class LlmOutput:
     content: Optional[str] = None
@@ -228,33 +134,11 @@ class LlmOutput:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-# Streaming tool call events
-@dataclass
-class LlmToolCallStarted:
-    call_id: str
-    name: str
-    args_partial: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class LlmToolCallDelta:
-    call_id: str
-    args_partial: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class LlmToolCallFinished:
-    call_id: str
-    name: str
-    args_final: dict[str, Any] = field(default_factory=dict)
-
-
+# ---------- Agent state ----------
 @dataclass
 class AgentState:
     state_id: str
     step: int = 0
     messages: list[Message] = field(default_factory=list)
-    last_action: Optional[Action] = field(default=None)
-    last_observation: Optional[Observation] = field(default=None)
-    done: bool = field(default=False)
+    done: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
