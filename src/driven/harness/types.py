@@ -36,7 +36,7 @@ ActionEvent = Union[RespondAction, CallToolAction]
 
 # ---------- ObservationEvents (to Reducer) ----------
 @dataclass(frozen=True)
-class AssistantSaid:
+class AssistantResp:
     content: str
 
 
@@ -53,27 +53,8 @@ class ToolFailed:
     message: str
 
 
-ObservationEvent = Union[AssistantSaid, ToolProduced, ToolFailed]
-
-
-# ---------- Lifecycle/Telemetry Events (Emitter-only) ----------
-@dataclass(frozen=True)
-class RunStarted:
-    run_id: str
-
-
-@dataclass(frozen=True)
-class StepAdvanced:
-    step: int
-
-
-@dataclass(frozen=True)
-class RunEnded:
-    run_id: str
-    reason: Literal["done", "stopped"] = "done"
-
-
-AnyEvent = Union[ActionEvent, ObservationEvent, RunStarted, StepAdvanced, RunEnded]
+ObservationEvent = Union[AssistantResp, ToolProduced, ToolFailed]
+AnyEvent = Union[ActionEvent, ObservationEvent]
 
 
 # ---------- LLM contracts ----------
@@ -157,6 +138,7 @@ class LlmOutput:
 @dataclass
 class AgentState:
     state_id: str
+    prompt: str
     step: int = 0
     messages: list[Message] = field(default_factory=list)
     done: bool = False

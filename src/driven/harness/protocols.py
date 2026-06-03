@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import (
     AsyncIterator,
     Optional,
@@ -9,6 +10,7 @@ from typing import (
 )
 
 from driven.harness.types import (
+    AnyEvent,
     LlmToolFunction,
     Message,
     AgentState,
@@ -20,18 +22,17 @@ from driven.harness.types import (
     ActionEvent,
     ObservationEvent,
     CallToolAction,
-    AnyEvent,
 )
 
 
 @runtime_checkable
 class Emitter(Protocol):
-    async def emit(self, events: Union[AnyEvent, Sequence[AnyEvent]]) -> None: ...
+    async def emit(self, events: Union[dict, AnyEvent, Sequence[dict], Sequence[AnyEvent]]) -> None: ...
 
 
 @runtime_checkable
 class StateManager(Protocol):
-    async def load(self, run_id: str, input: list[Message]) -> AgentState: ...
+    async def load(self, run_id: str) -> AgentState: ...
     async def save(self, state: AgentState) -> AgentState: ...
 
 
