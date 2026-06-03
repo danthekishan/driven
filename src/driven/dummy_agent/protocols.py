@@ -1,10 +1,10 @@
 from typing import Any, Optional, Sequence, Union
-from driven.harness.protocols import StateManager, Emitter, Llm, Runtime, Reducer
+from driven.harness.protocols import StateManager, Emitter, Llm, Runtime
 from driven.harness.types import (
     AgentState,
     Message,
     CallToolAction,
-    AssistantSaid,
+    AssistantResp,
     ObservationEvent,
     ToolProduced,
     ToolFailed,
@@ -16,14 +16,11 @@ class InMemoryStateManager(StateManager):
     def __init__(self):
         self.store: dict[str, AgentState] = {}
 
-    async def load(self, run_id: str, input: list[Message]) -> AgentState:
+    async def load(self, run_id: str) -> AgentState:
         if run_id in self.store:
-            existing_state = self.store[run_id]
-            # Merge new input onto messages without losing previous state
-            existing_state.messages.extend(input)
-            return existing_state
+            return self.store[run_id]
 
-        state = AgentState(state_id=run_id, messages=input.copy())
+        state = AgentState(state_id=run_id, prompt="", messages=[])
         self.store[run_id] = state
         return state
 
@@ -94,42 +91,3 @@ class DummyRuntime(Runtime):
                     tool_name=action.name, error_type=type(e).__name__, message=str(e)
                 )
             ]
-
-
-class SimpleReducer(Reducer):
-    async def apply(
-        self,
-        state: AgentState,
-        events: Union[ObservationEvent, Sequence[ObservationEvent]],
-    ) -> AgentState:
-        # Normalize to list
-        if not isinstance(events, Sequence):
-            events = [events]
-
-        for event in events:
-            if isinstance(event, AssistantSaid):
-                state.messages.append(Message(role="assistant", content=event.content))
-                # Simple policy: stop if assistant replied with empty content
-                if event.content.strip() == "":
-                    state.done = True
-
-            elif isinstance(event, ToolProduced):
-                state.messages.append(
-                    Message(
-                        role="tool", name=event.tool_name, content=str(event.content)
-                    )
-                )
-
-            elif isinstance(event, ToolFailed):
-                state.messages.append(
-                    Message(
-                        role="tool",
-                        name=event.tool_name,
-                        content=f"[{event.error_type}] {event.message}",
-                    )
-                )
-            else:
-                # Unknown observation: no-op
-                pass
-
-        return state

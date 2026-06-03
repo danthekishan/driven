@@ -141,5 +141,11 @@ class AgentState:
     prompt: str
     step: int = 0
     messages: list[Message] = field(default_factory=list)
+    # Per-step captures
+    recent_actions: list[ActionEvent] = field(default_factory=list)
+    recent_observations: list[ObservationEvent] = field(default_factory=list)
+    actions_log: list[list[ActionEvent]] = field(default_factory=list)
+    observations_log: list[list[ObservationEvent]] = field(default_factory=list)
+    # Control
     done: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)

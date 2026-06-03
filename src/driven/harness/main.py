@@ -1,7 +1,7 @@
 from uuid import uuid4
 from functools import wraps
-from dataclasses import asdict, dataclass
-from typing import Awaitable, Callable, Literal, Optional, Protocol, Union
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Optional, Protocol
 
 from driven.harness.protocols import (
     Controller,
@@ -9,7 +9,6 @@ from driven.harness.protocols import (
     Runtime,
     Llm,
     StateManager,
-    Reducer,
 )
 from driven.harness.types import (
     AgentState,
@@ -97,7 +96,6 @@ class Context:
     controller: Controller
     runtime: Runtime
     llm: Llm
-    reducer: Reducer
     emitter: Optional[Emitter] = None
 
 
@@ -111,8 +109,10 @@ class Middleware(Protocol):
 
 
 async def _run(state: AgentState, ctx: Context) -> AgentState:
+    # Advance step
     state.step += 1
 
+    # Decide actions with dynamic tools
     actions = await ctx.controller.decide(
         messages=state.messages,
         get_tools=ctx.runtime.get_tools,
@@ -122,10 +122,12 @@ async def _run(state: AgentState, ctx: Context) -> AgentState:
 
     observations: list[ObservationEvent] = []
 
-    for action in actions:
-        if ctx.emitter:
-            await ctx.emitter.emit(action)
+    # Emit actions as a batch (if any)
+    if ctx.emitter and actions:
+        await ctx.emitter.emit(actions)
 
+    # Map actions to observations
+    for action in actions:
         if isinstance(action, RespondAction):
             observations.append(AssistantResp(content=action.content))
         elif isinstance(action, CallToolAction):
@@ -136,14 +138,43 @@ async def _run(state: AgentState, ctx: Context) -> AgentState:
         else:
             raise RuntimeError(f"Unknown action type: {type(action)}")
 
+    # Emit observations as a batch (if any)
     if ctx.emitter and observations:
         await ctx.emitter.emit(observations)
 
-    # for event in observations:
-    #     match event:
-    #         case AssistantResp():
+    # Capture recents/logs
+    state.recent_actions = actions
+    state.recent_observations = observations
+    state.actions_log.append(actions)
+    state.observations_log.append(observations)
 
-    state = await ctx.reducer.apply(state, observations)
+    # Update transcript and minimal stop policy
+    for event in observations:
+        if isinstance(event, AssistantResp):
+            state.messages.append(Message(role="assistant", content=event.content))
+            if event.content.strip() == "":
+                state.done = True
+        elif hasattr(event, "tool_name") and hasattr(event, "content"):
+            # ToolProduced
+            state.messages.append(
+                Message(
+                    role="tool",
+                    name=getattr(event, "tool_name"),
+                    content=str(getattr(event, "content")),
+                )
+            )
+        elif hasattr(event, "tool_name") and hasattr(event, "error_type"):
+            # ToolFailed
+            state.messages.append(
+                Message(
+                    role="tool",
+                    name=getattr(event, "tool_name"),
+                    content=f"[{getattr(event, 'error_type')}] {getattr(event, 'message')}",
+                )
+            )
+        else:
+            pass
+
     return state
 
 
@@ -164,6 +195,55 @@ def build_chain(middlewares, handler):
     return chain
 
 
+# ---- Example middlewares ----
+
+def compaction_step_middleware(max_messages: int = 20, keep_last: int = 12) -> Middleware:
+    async def mw(state: AgentState, ctx: Context, next: Next) -> AgentState:
+        new_state = await next(state, ctx)
+        if new_state.done:
+            return new_state
+        msgs = new_state.messages
+        if len(msgs) > max_messages:
+            drop = len(msgs) - keep_last
+            compaction_note = Message(
+                role="assistant",
+                content=f"[compacted {drop} messages]",
+            )
+            new_state.messages = [compaction_note] + msgs[-keep_last:]
+            # Track simple counter
+            total = int(new_state.metadata.get("compacted_total", 0)) + drop
+            new_state.metadata["compacted_total"] = total
+        return new_state
+
+    return mw
+
+
+def lifecycle_session_middleware(run_id: Optional[str] = None) -> Middleware:
+    async def mw(state: AgentState, ctx: Context, next: Next) -> AgentState:
+        # Emit run_started
+        if ctx.emitter:
+            await ctx.emitter.emit({"type": "run_started", "run_id": run_id or state.state_id})
+        # Run loop
+        new_state = await next(state, ctx)
+        # Emit run_ended
+        if ctx.emitter:
+            await ctx.emitter.emit({"type": "run_ended", "run_id": run_id or state.state_id, "reason": "done" if new_state.done else "stopped"})
+        return new_state
+
+    return mw
+
+
+def lifecycle_step_middleware() -> Middleware:
+    async def mw(state: AgentState, ctx: Context, next: Next) -> AgentState:
+        prev_step = state.step
+        new_state = await next(state, ctx)
+        if ctx.emitter and new_state.step != prev_step:
+            await ctx.emitter.emit({"type": "step_advanced", "step": new_state.step})
+        return new_state
+
+    return mw
+
+
 class Harness:
     def __init__(self, ctx: Context, step_middlewares, session_middlewares):
         self.ctx = ctx
@@ -182,15 +262,32 @@ class Harness:
 
         return state
 
-    async def run(self):
+    async def run(
+        self,
+        run_id: Optional[str] = None,
+        prompt: str = "",
+        input: list[Message] | None = None,
+    ):
         await self.startup()
 
-        run_id = uuid4()
-        state = await self.ctx.state_manager.load(str(run_id))
-
+        rid = str(run_id or uuid4())
+        state: Optional[AgentState] = None
         try:
+            state = await self.ctx.state_manager.load(rid)
+
+            # Inject initial prompt and input if this looks like a new state
+            if (
+                state.step == 0
+                and not state.messages
+                and not getattr(state, "prompt", "")
+            ):
+                state.prompt = prompt
+            if input:
+                state.messages.extend(input)
+
             state = await self.session_runner(state, self.ctx)
             return state
         finally:
-            await self.ctx.state_manager.save(state)
+            if state is not None:
+                await self.ctx.state_manager.save(state)
             await self.shutdown()

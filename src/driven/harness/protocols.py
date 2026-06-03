@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import (
     AsyncIterator,
     Optional,
@@ -27,22 +26,15 @@ from driven.harness.types import (
 
 @runtime_checkable
 class Emitter(Protocol):
-    async def emit(self, events: Union[dict, AnyEvent, Sequence[dict], Sequence[AnyEvent]]) -> None: ...
+    async def emit(
+        self, events: Union[dict, AnyEvent, Sequence[dict], Sequence[AnyEvent]]
+    ) -> None: ...
 
 
 @runtime_checkable
 class StateManager(Protocol):
     async def load(self, run_id: str) -> AgentState: ...
     async def save(self, state: AgentState) -> AgentState: ...
-
-
-@runtime_checkable
-class Reducer(Protocol):
-    async def apply(
-        self,
-        state: AgentState,
-        events: Union[ObservationEvent, Sequence[ObservationEvent]],
-    ) -> AgentState: ...
 
 
 @runtime_checkable
