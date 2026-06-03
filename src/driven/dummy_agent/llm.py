@@ -9,10 +9,8 @@ from driven.harness.types import (
     LlmTextResponse,
     LlmToolFunction,
     CallToolAction,
-    FinishAction,
     Message,
     RespondAction,
-    RunContext,
 )
 
 
@@ -95,16 +93,13 @@ class ScriptedLlm(Llm):
 class LlmController(Controller):
     async def decide(
         self,
-        run_context: RunContext,
+        messages: list[Message],
+        tools: list[LlmToolFunction],
         llm: Llm,
         sink: Optional[Emitter] = None,
     ):
-        tools = run_context.get_tools_info()
-
         request = LlmInput(
-            input=run_context.input,
-            history=run_context.history,
-            metadata=run_context.metadata,
+            messages=messages,
         )
 
         response = await llm.chat_with_tools(
@@ -143,7 +138,8 @@ class LlmController(Controller):
 
             return action, [message]
 
+        # Signal finish via RespondAction metadata; reducer decides how to set done
         return (
-            FinishAction(content="done"),
+            RespondAction(content="", metadata={"done": True}),
             [],
         )

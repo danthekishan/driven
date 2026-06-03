@@ -5,12 +5,10 @@ from driven.harness.types import (
     LlmRequestEventPayload,
     LlmResponseEventPayload,
     Message,
-    RunContext,
     AgentEvent,
     Action,
     CallToolAction,
     EventType,
-    FinishAction,
     Observation,
     RespondAction,
     ToolResult,
@@ -25,44 +23,24 @@ class InMemoryStateManager(StateManager):
     def __init__(self):
         self.store: dict[str, AgentState] = {}
 
-    async def load(
-        self,
-        run_id: str,
-        input: list[Message],
-    ) -> AgentState:
+    async def load(self, run_id: str, input: list[Message]) -> AgentState:
         if run_id in self.store:
-            return self.store[run_id]
+            existing_state = self.store[run_id]
+            # Merge new input onto messages without losing previous state
+            existing_state.messages.extend(input)
+            return existing_state
 
-        state = AgentState(
-            state_id=run_id,
-            run_context=RunContext(
-                id=run_id,
-                state_id=run_id,
-                history=input,
-                metadata={},
-                get_tools_info=lambda: [],
-            ),
-            history=input.copy(),
-        )
-
+        state = AgentState(state_id=run_id, messages=input.copy())
         self.store[run_id] = state
-
         return state
 
-    async def save(
-        self,
-        state: AgentState,
-    ) -> AgentState:
+    async def save(self, state: AgentState) -> AgentState:
         self.store[state.state_id] = state
-
         return state
 
 
 class PrintEmitter(Emitter):
-    async def emit(
-        self,
-        event: AgentEvent,
-    ) -> None:
+    async def emit(self, event: AgentEvent) -> None:
         print(event)
 
 
@@ -70,22 +48,13 @@ class DummyRuntime(Runtime):
     def __init__(self):
         self.tools: dict[str, Any] = {}
 
-    def register_tool(
-        self,
-        name: str,
-        fn,
-        description: str = "",
-    ):
+    def register_tool(self, name: str, fn, description: str = ""):
         self.tools[name] = {
             "fn": fn,
             "description": description,
         }
 
-    def get_tools(
-        self,
-        *args,
-        **kwargs,
-    ) -> list[LlmToolFunction]:
+    def get_tools(self, *args, **kwargs) -> list[LlmToolFunction]:
         output = []
 
         for name, tool in self.tools.items():
@@ -103,20 +72,11 @@ class DummyRuntime(Runtime):
         self,
         action: Action,
         state: AgentState,
-        run_context: RunContext,
         llm: Llm,
         sink: Optional[Emitter] = None,
     ) -> tuple[Observation, list[Message]]:
 
         if isinstance(action, RespondAction):
-            observation = Observation(
-                data=action.content,
-                kind="tool_result",
-            )
-
-            return observation, []
-
-        if isinstance(action, FinishAction):
             observation = Observation(
                 data=action.content,
                 kind="tool_result",
@@ -181,16 +141,9 @@ class DummyRuntime(Runtime):
 
             return observation, [tool_message]
 
-        raise RuntimeError(f"Unhandled action type: {type(action)}")
-
 
 class SimpleReducer(Reducer):
-    async def apply(
-        self,
-        state: AgentState,
-        event: AgentEvent,
-    ) -> AgentState:
-
+    async def apply(self, state: AgentState, event: AgentEvent) -> AgentState:
         payload = event.payload
 
         match payload:
@@ -199,17 +152,18 @@ class SimpleReducer(Reducer):
 
             case ActionEventPayload():
                 state.last_action = payload.action
-                state.history.extend(payload.agent_messages)
+                state.messages.extend(payload.agent_messages)
 
-                if isinstance(
-                    payload.action,
-                    FinishAction,
-                ):
+                # Allow controller to signal finish via action metadata
+                try:
+                    done_flag = getattr(payload.action, "metadata", {}).get("done")
+                except Exception:
+                    done_flag = False
+                if done_flag:
                     state.done = True
 
             case ObservationEventPayload():
                 state.last_observation = payload.observation
-
-                state.history.extend(payload.tool_messages)
+                state.messages.extend(payload.tool_messages)
 
         return state

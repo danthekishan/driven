@@ -39,20 +39,21 @@ class Harness:
         state = await self.state_manager.load(run_id, input)
 
         while True:
-            step_event = AgentEvent(GenericEventPayload(type=EventType.STEP_STARTED, data={}))
+            step_event = AgentEvent(
+                GenericEventPayload(type=EventType.STEP_STARTED, data={})
+            )
             # Emit externally (if provided) then reduce
             if self.emitter:
                 await self.emitter.emit(step_event)
             state = await self.reducer.apply(state, step_event)
 
-            run_context = state.build_run_context(
-                run_id=run_id,
-                get_tools_info=self.runtime.get_tools,
-            )
+            # Fetch tools for this step (dynamic)
+            tools = self.runtime.get_tools()
 
             # request
             action, agent_messages = await self.controller.decide(
-                run_context=run_context,
+                messages=state.messages,
+                tools=tools,
                 llm=self.llm,
                 sink=self.emitter,
             )
@@ -68,7 +69,6 @@ class Harness:
             observation, tool_messages = await self.runtime.execute(
                 action=action,
                 state=state,
-                run_context=run_context,
                 llm=self.llm,
                 sink=self.emitter,
             )

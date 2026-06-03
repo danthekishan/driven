@@ -9,7 +9,6 @@ from driven.harness.types import (
     LlmToolFunction,
     Message,
     Observation,
-    RunContext,
     AgentState,
     AgentEvent,
     LlmInput,
@@ -58,7 +57,6 @@ class Runtime(Protocol):
         self,
         action: Action,
         state: AgentState,
-        run_context: RunContext,
         llm: Llm,
         sink: Optional[Emitter] = None,
     ) -> tuple[Observation, list[Message]]: ...
@@ -75,7 +73,8 @@ class Controller(Protocol):
 
     async def decide(
         self,
-        run_context: RunContext,
+        messages: list[Message],
+        tools: list[LlmToolFunction],
         llm: Llm,
         sink: Optional[Emitter] = None,
     ) -> tuple[Action, list[Message]]: ...

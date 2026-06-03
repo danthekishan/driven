@@ -3,7 +3,6 @@ from enum import Enum, auto
 from typing import (
     NamedTuple,
     Any,
-    Callable,
     Literal,
     Optional,
     Union,
@@ -36,13 +35,6 @@ class RespondAction:
 
 
 @dataclass(frozen=True)
-class AskAction:
-    question: str
-    kind: Literal["ask"] = field(default="ask")
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class CallToolAction:
     tool_name: str
     kind: Literal["call_tool"] = field(default="call_tool")
@@ -50,15 +42,7 @@ class CallToolAction:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class FinishAction:
-    content: Optional[str]
-    kind: Literal["finish"] = field(default="finish")
-    reason: str = field(default="done")
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-Action = Union[RespondAction, AskAction, CallToolAction, FinishAction]
+Action = Union[RespondAction, CallToolAction]
 
 
 # ---------- Observations (results surfaced back into state) ----------
@@ -205,8 +189,7 @@ class Usage:
 
 @dataclass
 class LlmInput:
-    input: list[Message]
-    history: list[Message]
+    messages: list[Message]
     tool_choice: Optional[ToolChoice] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -267,36 +250,11 @@ class LlmToolCallFinished:
 
 
 @dataclass
-class RunContext:
-    id: str
-    state_id: str
-    get_tools_info: Callable[..., list[LlmToolFunction]]
-    tool_choice: ToolChoice = field(default="auto")
-    history: list[Message] = field(default_factory=list)
-    input: list[Message] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class AgentState:
     state_id: str
-    run_context: RunContext
     step: int = 0
-    history: list[Message] = field(default_factory=list)
-    input: list[Message] = field(default_factory=list)
+    messages: list[Message] = field(default_factory=list)
     last_action: Optional[Action] = field(default=None)
     last_observation: Optional[Observation] = field(default=None)
     done: bool = field(default=False)
     metadata: dict[str, Any] = field(default_factory=dict)
-
-    def build_run_context(
-        self, run_id: str, get_tools_info: Callable[..., list[LlmToolFunction]]
-    ) -> RunContext:
-        return RunContext(
-            id=run_id,
-            state_id=self.state_id,
-            get_tools_info=get_tools_info,
-            history=self.history,
-            input=self.input,
-            metadata=self.metadata,
-        )
