@@ -1,7 +1,11 @@
+import logging
 import functools
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, Protocol
+from typing import Any, AsyncGenerator, Awaitable, Callable, Optional, Protocol
+
+
+logger = logging.getLogger("core")
 
 
 # Type alias for the next function in the chain
@@ -15,8 +19,14 @@ class Middleware(Protocol):
 @dataclass(frozen=True)
 class Message:
     sender_id: str
-    payload: dict
+    payload: Any
     reply_to: Optional[asyncio.Future] = None
+
+
+@dataclass(frozen=True)
+class Event:
+    topic: str
+    payload: dict
 
 
 class Actor:
@@ -26,6 +36,45 @@ class Actor:
         self.mailbox: asyncio.Queue[Optional[Message]] = asyncio.Queue()
         self._middlewares: list[Middleware] = []
         self._chain = self._build_middleware_chain()
+
+        self._events_queues: dict[str, list[asyncio.Queue]] = {}
+
+    def _get_queue(self, action: str):
+        if action_queue := self._events_queues.get(action):
+            return action_queue
+        else:
+            raise KeyError(f"Queue not found: {action}")
+
+    def add_queue_to_action(self, action: str, queue: asyncio.Queue):
+        if action not in self._events_queues.keys():
+            self._events_queues[action] = [queue]
+        else:
+            self._events_queues[action].append(queue)
+
+    def remove_queue_from_action(self, action: str, queue: asyncio.Queue):
+        """Removes a subscriber queue to prevent memory leaks."""
+        if action in self._events_queues and queue in self._events_queues[action]:
+            self._events_queues[action].remove(queue)
+            # Clean up the dictionary key if no one is listening anymore
+            if not self._events_queues[action]:
+                del self._events_queues[action]
+
+    def emit(self, action: str, payload: dict):
+        if not self._events_queues.get(action):
+            self._events_queues[action] = []
+
+        event = Event(topic=f"{self.id}.{action}", payload=payload)
+
+        for queue in self._events_queues.get(action, []):
+            try:
+                # Try to push the event immediately without blocking
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # The subscriber is too slow. Drop the event and log it.
+                logger.warning(
+                    f"Dropped event '{event.topic}' for a subscriber. "
+                    f"Queue is at max capacity ({queue.maxsize})."
+                )
 
     def update_middlewares(self, middlewares: list[Middleware]):
         self._middlewares.extend(middlewares)
@@ -66,7 +115,7 @@ class Actor:
         """Override to clean up resources."""
         pass
 
-    async def handle_message(self, payload: dict) -> Any:
+    async def handle_message(self, payload: Any) -> Any:
         raise NotImplementedError
 
     async def _run_loop(self):
@@ -103,6 +152,7 @@ class Registry:
         self.default_middlewares = default_middlewares
         self._mailboxes: dict[str, asyncio.Queue] = {}
         self._tg: Optional[asyncio.TaskGroup] = None
+        self._actors: dict[str, Actor] = {}
 
     async def __aenter__(self):
         self._tg = asyncio.TaskGroup()
@@ -128,7 +178,7 @@ class Registry:
                 raise
             except Exception as e:
                 retries += 1
-                print(
+                logger.info(
                     f"[Supervisor] Actor '{actor.id}' crashed: {e}. Restarting ({retries}/{max_retries})..."
                 )
                 await asyncio.sleep(1)
@@ -137,14 +187,56 @@ class Registry:
         if self._tg is None:
             raise RuntimeError("Registry must be used within 'async with'.")
 
+        self._actors[actor.id] = actor
         mws = [*middlewares, *self.default_middlewares]
         actor.update_middlewares(mws)
 
         self._mailboxes[actor.id] = actor.mailbox
         self._tg.create_task(self._supervise_actor(actor))
 
+    async def subscribe(self, channel: str) -> AsyncGenerator[Event, None]:
+        """
+        Creates a real-time event stream.
+        Note: Target actors must be registered BEFORE this is called.
+        """
+        actor_id, action = channel.split(".")
+        # Create a bounded queue that holds a maximum of 1000 pending events
+        queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=1000)
+
+        attached_actors: list[Actor] = []
+
+        if actor_id == "*":
+            # Attach ONLY to currently registered actors
+            if not self._actors:
+                logger.warning(
+                    f"Subscribing to '*.{action}', but no actors are registered yet!"
+                )
+
+            for actor in self._actors.values():
+                actor.add_queue_to_action(action, queue)
+                attached_actors.append(actor)
+        else:
+            if actor := self._actors.get(actor_id):
+                actor.add_queue_to_action(action, queue)
+                attached_actors.append(actor)
+            else:
+                raise KeyError(
+                    f"Cannot subscribe: Actor '{actor_id}' is not registered."
+                )
+
+        # Yield events until canceled
+        try:
+            while True:
+                yield await queue.get()
+        except asyncio.CancelledError:
+            pass  # Graceful exit
+        finally:
+            # CLEANUP: Remove this queue from the specific actors it was attached to
+            for actor in attached_actors:
+                actor.remove_queue_from_action(action, queue)
+
     async def ask(
-        self, target: str, sender_id: str, payload: dict, timeout: float = 5.0
+        self, target: str, sender_id: str, payload: Any, timeout: float = 5.0
     ) -> Any:
         if target not in self._mailboxes:
             raise ValueError(f"Target '{target}' not found.")
