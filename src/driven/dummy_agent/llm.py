@@ -1,7 +1,8 @@
 from collections import deque
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Callable, Optional
 
 from driven.harness.types import (
+    ActionEvent,
     LlmInput,
     LlmOutput,
     LlmStructuredResponse,
@@ -94,52 +95,23 @@ class LlmController(Controller):
     async def decide(
         self,
         messages: list[Message],
-        tools: list[LlmToolFunction],
+        get_tools: Callable[..., list[LlmToolFunction]],
         llm: Llm,
         sink: Optional[Emitter] = None,
-    ):
-        request = LlmInput(
-            messages=messages,
-        )
-
-        response = await llm.chat_with_tools(
-            request=request,
-            tools=tools,
-        )
+    ) -> list[ActionEvent]:
+        request = LlmInput(messages=messages)
+        tools = get_tools()
+        response = await llm.chat_with_tools(request=request, tools=tools)
 
         if response.tool_call:
-            action = CallToolAction(
-                tool_name=response.tool_call.name,
-                arguments=response.tool_call.arguments,
-            )
+            return [
+                CallToolAction(
+                    name=response.tool_call.name, arguments=response.tool_call.arguments
+                )
+            ]
 
-            message = Message(
-                role="assistant",
-                content="",
-                metadata={
-                    "tool_call": {
-                        "name": response.tool_call.name,
-                        "arguments": response.tool_call.arguments,
-                    }
-                },
-            )
+        if response.content is not None:
+            return [RespondAction(content=response.content)]
 
-            return action, [message]
-
-        if response.content:
-            action = RespondAction(
-                content=response.content,
-            )
-
-            message = Message(
-                role="assistant",
-                content=response.content,
-            )
-
-            return action, [message]
-
-        # Signal finish via RespondAction metadata; reducer decides how to set done
-        return (
-            RespondAction(content="", metadata={"done": True}),
-            [],
-        )
+        # Nothing useful: return an empty assistant response; reducer policy may stop after this
+        return [RespondAction(content="")]

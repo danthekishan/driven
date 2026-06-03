@@ -1,21 +1,14 @@
-from typing import Any, Optional
+from typing import Any, Optional, Sequence, Union
 from driven.harness.protocols import StateManager, Emitter, Llm, Runtime, Reducer
 from driven.harness.types import (
     AgentState,
-    LlmRequestEventPayload,
-    LlmResponseEventPayload,
     Message,
-    AgentEvent,
-    Action,
     CallToolAction,
-    EventType,
-    Observation,
-    RespondAction,
-    ToolResult,
+    AssistantSaid,
+    ObservationEvent,
+    ToolProduced,
+    ToolFailed,
     LlmToolFunction,
-    ObservationEventPayload,
-    GenericEventPayload,
-    ActionEventPayload,
 )
 
 
@@ -40,8 +33,13 @@ class InMemoryStateManager(StateManager):
 
 
 class PrintEmitter(Emitter):
-    async def emit(self, event: AgentEvent) -> None:
-        print(event)
+    async def emit(self, events) -> None:
+        # Accept single or list
+        if isinstance(events, (list, tuple)):
+            for e in events:
+                print(e)
+        else:
+            print(events)
 
 
 class DummyRuntime(Runtime):
@@ -70,100 +68,68 @@ class DummyRuntime(Runtime):
 
     async def execute(
         self,
-        action: Action,
+        action: CallToolAction,
         state: AgentState,
         llm: Llm,
         sink: Optional[Emitter] = None,
-    ) -> tuple[Observation, list[Message]]:
+    ) -> list[ObservationEvent]:
 
-        if isinstance(action, RespondAction):
-            observation = Observation(
-                data=action.content,
-                kind="tool_result",
-            )
-
-            return observation, []
-
-        if isinstance(action, CallToolAction):
-            if action.tool_name not in self.tools:
-                raise RuntimeError(f"Unknown tool: {action.tool_name}")
-
-            tool = self.tools[action.tool_name]["fn"]
-
-            if sink:
-                await sink.emit(
-                    # TODO:
-                    AgentEvent(
-                        payload=LlmRequestEventPayload(
-                            type=EventType.TOOL_CALL_STARTED,
-                            op_type="tool",
-                            model="xxxx",
-                            prompt="",
-                            extra={
-                                "tool": action.tool_name,
-                            },
-                        )
-                    )
+        if action.name not in self.tools:
+            return [
+                ToolFailed(
+                    tool_name=action.name,
+                    error_type="unknown_tool",
+                    message=f"Unknown tool: {action.name}",
                 )
+            ]
 
+        tool = self.tools[action.name]["fn"]
+
+        try:
             result = await tool(**action.arguments)
-
-            if sink:
-                await sink.emit(
-                    # TODO:
-                    AgentEvent(
-                        payload=LlmResponseEventPayload(
-                            type=EventType.TOOL_CALL_ENDED,
-                            op_type="tool",
-                            model="xxxx",
-                            prompt="",
-                            response={},
-                            extra={
-                                "tool": action.tool_name,
-                            },
-                        )
-                    )
+            return [ToolProduced(tool_name=action.name, content=result)]
+        except Exception as e:
+            return [
+                ToolFailed(
+                    tool_name=action.name, error_type=type(e).__name__, message=str(e)
                 )
-
-            observation = Observation(
-                data=ToolResult(
-                    ok=True,
-                    content=result,
-                ),
-                kind="tool_result",
-            )
-
-            tool_message = Message(
-                role="tool",
-                content=str(result),
-                name=action.tool_name,
-            )
-
-            return observation, [tool_message]
+            ]
 
 
 class SimpleReducer(Reducer):
-    async def apply(self, state: AgentState, event: AgentEvent) -> AgentState:
-        payload = event.payload
+    async def apply(
+        self,
+        state: AgentState,
+        events: Union[ObservationEvent, Sequence[ObservationEvent]],
+    ) -> AgentState:
+        # Normalize to list
+        if not isinstance(events, Sequence):
+            events = [events]
 
-        match payload:
-            case GenericEventPayload(type=EventType.STEP_STARTED):
-                state.step += 1
-
-            case ActionEventPayload():
-                state.last_action = payload.action
-                state.messages.extend(payload.agent_messages)
-
-                # Allow controller to signal finish via action metadata
-                try:
-                    done_flag = getattr(payload.action, "metadata", {}).get("done")
-                except Exception:
-                    done_flag = False
-                if done_flag:
+        for event in events:
+            if isinstance(event, AssistantSaid):
+                state.messages.append(Message(role="assistant", content=event.content))
+                # Simple policy: stop if assistant replied with empty content
+                if event.content.strip() == "":
                     state.done = True
 
-            case ObservationEventPayload():
-                state.last_observation = payload.observation
-                state.messages.extend(payload.tool_messages)
+            elif isinstance(event, ToolProduced):
+                state.messages.append(
+                    Message(
+                        role="tool", name=event.tool_name, content=str(event.content)
+                    )
+                )
+
+            elif isinstance(event, ToolFailed):
+                state.messages.append(
+                    Message(
+                        role="tool",
+                        name=event.tool_name,
+                        content=f"[{event.error_type}] {event.message}",
+                    )
+                )
+            else:
+                # Unknown observation: no-op
+                pass
 
         return state
