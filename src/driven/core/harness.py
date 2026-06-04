@@ -74,6 +74,8 @@ class Llm(Protocol):
 
 @runtime_checkable
 class Runtime(Protocol):
+    async def __aenter__(self) -> Any: ...
+    async def __aexit__(self, exc_type, exc, tb): ...
     def get_tools(self, *args, **kwargs) -> list[LlmToolFunction]: ...
     async def call_tool(
         self,
@@ -237,11 +239,12 @@ class Harness:
         self.step_runner = build_chain(step_middlewares, _run)
         self.session_runner = build_chain(session_middlewares, self._run_loop)
 
-    async def startup(self):
-        pass
+    async def __aenter__(self):
+        await self.ctx.runtime.__aenter__()
+        return self
 
-    async def shutdown(self):
-        pass
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.ctx.runtime.__aexit__(exc_type, exc, tb)
 
     async def _run_loop(self, state: HarnessState, ctx: HarnessContext):
         while not state.done:
@@ -255,8 +258,6 @@ class Harness:
         prompt: str = "",
         input: list[Message] | None = None,
     ):
-        await self.startup()
-
         rid = str(run_id or uuid4())
         state: Optional[HarnessState] = None
         try:
@@ -276,4 +277,3 @@ class Harness:
         finally:
             if state is not None:
                 await self.ctx.state_manager.save(state)
-            await self.shutdown()

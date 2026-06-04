@@ -1,4 +1,4 @@
-from driven.core import Extension, tool
+from driven.core.tool_runtime import Extension, tool
 
 
 class MathExtension(Extension):

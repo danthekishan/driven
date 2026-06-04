@@ -524,7 +524,13 @@ class Extension:
 
 
 class ExtensionRegistry:
-    def __init__(self, max_start_attempts: int = 3, retry_delay: float = 2.0):
+    def __init__(
+        self,
+        exts: list[Extension] = [],
+        max_start_attempts: int = 3,
+        retry_delay: float = 2.0,
+    ):
+        self.exts = exts
         self.extensions: dict[str, Extension] = {}
         self.tools: dict[str, RegisteredTool] = {}
         self.max_start_attempts = max_start_attempts
@@ -534,6 +540,10 @@ class ExtensionRegistry:
     async def __aenter__(self):
         self._tg = asyncio.TaskGroup()
         await self._tg.__aenter__()
+
+        for ext in self.exts:
+            await self.register(ext)
+
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -626,17 +636,26 @@ class ExtensionRegistry:
         state: Optional[HarnessState],
         llm: Optional[Llm],
         emitter: (Optional[Emitter]) = None,
+        timeout: Optional[float] = None,
     ) -> list[ObservationEvent]:
         try:
             registered = self.tools.get(fn_name)
             if registered is None:
                 raise RuntimeError(f"Unknown tool '{fn_name}'")
 
-            result = await registered.tool.run(
-                arguments,
-                runtime_context={"state": state, "llm": llm, "emitter": emitter},
-            )
-            return [ToolProduced(tool_name=fn_name, content=result)]
+            async with asyncio.timeout(timeout):
+                result = await registered.tool.run(
+                    arguments,
+                    runtime_context={"state": state, "llm": llm, "emitter": emitter},
+                )
+                return [ToolProduced(tool_name=fn_name, content=result)]
+
+        except TimeoutError as e:
+            return [
+                ToolFailed(
+                    tool_name=fn_name, error_type=(type(e).__name__), message=str(e)
+                )
+            ]
 
         except Exception as e:
             return [
