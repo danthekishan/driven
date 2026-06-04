@@ -1,8 +1,8 @@
 import asyncio
 
 from typing import Optional
+from driven.agent.controller import ToolCallingController
 from driven.core.tool_runtime import ExtensionRegistry
-from driven.dummy_agent.llm import LlmController, ScriptedLlm
 from driven.core.harness import (
     Harness,
     HarnessContext,
@@ -10,12 +10,9 @@ from driven.core.harness import (
     StateManager,
     Emitter,
 )
-from driven.core.tool_runtime import Extension, tool
-from driven.core.schemas import (
-    LlmOutput,
-    Message,
-    ToolCall,
-)
+from driven.core.schemas import Message
+from driven.extensions.coder import CoderExtension
+from driven.llm_providers.openai import OpenAILlm
 
 
 class InMemoryStateManager(StateManager):
@@ -45,51 +42,14 @@ class PrintEmitter(Emitter):
             print(event_type, events)
 
 
-class SlackExtension(Extension):
-    name = "slack"
-    description = "Slack communication tools."
-
-    async def start(self):
-        self.client = object()
-        print("[SlackExtension] started")
-
-    async def stop(self):
-        print("[SlackExtension] stopped")
-
-    @tool(description="Send slack message")
-    async def send(self, channel: str, message: str, emitter: Optional[Emitter]):
-        if emitter:
-            await emitter.emit("slack.send emit", {"hello": "hello from slack.sned"})
-        return {
-            "channel": channel,
-            "message": message,
-            "status": "sent",
-        }
-
-
-async def search_tool(query: str):
-    return f"search result for: {query}"
-
-
 async def main():
-    llm = ScriptedLlm(
-        responses=[
-            LlmOutput(
-                tool_call=ToolCall(
-                    name="slack.send",
-                    arguments={"channel": "#general", "message": "hello"},
-                )
-            ),
-            LlmOutput(content="Python is great"),
-            LlmOutput(),
-        ]
-    )
+    llm = OpenAILlm()
 
-    runtime = ExtensionRegistry(exts=[SlackExtension()])
+    runtime = ExtensionRegistry(exts=[CoderExtension()])
 
     ctx = HarnessContext(
         state_manager=InMemoryStateManager(),
-        controller=LlmController(),
+        controller=ToolCallingController(),
         runtime=runtime,
         llm=llm,
         emitter=PrintEmitter(),
