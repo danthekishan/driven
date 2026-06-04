@@ -1,7 +1,7 @@
 from collections import deque
 from typing import AsyncIterator, Callable, Optional
 
-from driven.harness.types import (
+from driven.core.schemas import (
     ActionEvent,
     LlmInput,
     LlmOutput,
@@ -15,7 +15,7 @@ from driven.harness.types import (
 )
 
 
-from driven.harness.protocols import (
+from driven.core.harness import (
     Controller,
     Emitter,
     Llm,
@@ -97,7 +97,7 @@ class LlmController(Controller):
         messages: list[Message],
         get_tools: Callable[..., list[LlmToolFunction]],
         llm: Llm,
-        sink: Optional[Emitter] = None,
+        emitter: Optional[Emitter] = None,
     ) -> list[ActionEvent]:
         request = LlmInput(messages=messages)
         tools = get_tools()

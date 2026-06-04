@@ -6,8 +6,8 @@ from driven.dummy_agent.protocols import (
     DummyRuntime,
     InMemoryStateManager,
 )
-from driven.harness.main import Harness, Context
-from driven.harness.types import (
+from driven.core.harness import Harness, HarnessContext
+from driven.core.schemas import (
     LlmOutput,
     Message,
     ToolCall,
@@ -30,7 +30,7 @@ async def main():
     runtime = DummyRuntime()
     runtime.register_tool(name="search", fn=search_tool, description="Search something")
 
-    ctx = Context(
+    ctx = HarnessContext(
         state_manager=InMemoryStateManager(),
         controller=LlmController(),
         runtime=runtime,
@@ -39,7 +39,7 @@ async def main():
     )
 
     # Middlewares: lifecycle at session level, compaction at step level
-    from driven.harness.main import (
+    from driven.core.harness_middlewares import (
         lifecycle_session_middleware,
         lifecycle_step_middleware,
         compaction_step_middleware,

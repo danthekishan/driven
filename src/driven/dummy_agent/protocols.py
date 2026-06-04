@@ -1,10 +1,7 @@
-from typing import Any, Optional, Sequence, Union
-from driven.harness.protocols import StateManager, Emitter, Llm, Runtime
-from driven.harness.types import (
-    AgentState,
-    Message,
-    CallToolAction,
-    AssistantResp,
+from typing import Any, Optional
+from driven.core.harness import HarnessState, StateManager, Emitter, Llm, Runtime
+from driven.core.schemas import (
+    JSONValue,
     ObservationEvent,
     ToolProduced,
     ToolFailed,
@@ -14,29 +11,29 @@ from driven.harness.types import (
 
 class InMemoryStateManager(StateManager):
     def __init__(self):
-        self.store: dict[str, AgentState] = {}
+        self.store: dict[str, HarnessState] = {}
 
-    async def load(self, run_id: str) -> AgentState:
+    async def load(self, run_id: str) -> HarnessState:
         if run_id in self.store:
             return self.store[run_id]
 
-        state = AgentState(state_id=run_id, prompt="", messages=[])
+        state = HarnessState(state_id=run_id, prompt="", messages=[])
         self.store[run_id] = state
         return state
 
-    async def save(self, state: AgentState) -> AgentState:
+    async def save(self, state: HarnessState) -> HarnessState:
         self.store[state.state_id] = state
         return state
 
 
 class PrintEmitter(Emitter):
-    async def emit(self, events) -> None:
+    async def emit(self, event_type, events) -> None:
         # Accept single or list
         if isinstance(events, (list, tuple)):
             for e in events:
-                print(e)
+                print(event_type, e)
         else:
-            print(events)
+            print(event_type, events)
 
 
 class DummyRuntime(Runtime):
@@ -63,31 +60,33 @@ class DummyRuntime(Runtime):
 
         return output
 
-    async def execute(
+    async def call_tool(
         self,
-        action: CallToolAction,
-        state: AgentState,
+        fn_name: str,
+        arguments: dict[str, JSONValue],
+        state: HarnessState,
         llm: Llm,
-        sink: Optional[Emitter] = None,
+        emitter: Optional[Emitter] = None,
+        timeout: Optional[float] = None,
     ) -> list[ObservationEvent]:
 
-        if action.name not in self.tools:
+        if fn_name not in self.tools:
             return [
                 ToolFailed(
-                    tool_name=action.name,
+                    tool_name=fn_name,
                     error_type="unknown_tool",
-                    message=f"Unknown tool: {action.name}",
+                    message=f"Unknown tool: {fn_name}",
                 )
             ]
 
-        tool = self.tools[action.name]["fn"]
+        tool = self.tools[fn_name]["fn"]
 
         try:
-            result = await tool(**action.arguments)
-            return [ToolProduced(tool_name=action.name, content=result)]
+            result = await tool(**arguments)
+            return [ToolProduced(tool_name=fn_name, content=result)]
         except Exception as e:
             return [
                 ToolFailed(
-                    tool_name=action.name, error_type=type(e).__name__, message=str(e)
+                    tool_name=fn_name, error_type=type(e).__name__, message=str(e)
                 )
             ]
