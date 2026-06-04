@@ -4,7 +4,7 @@ from typing import Any, Literal, Optional, Union
 Role = Literal["system", "user", "assistant", "tool"]
 
 JSONValue = Union[
-    None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"]
+    None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"], object
 ]
 JSONSchema = dict[str, Any]
 
