@@ -56,3 +56,26 @@ def lifecycle_step_middleware() -> Middleware:
         return new_state
 
     return mw
+
+
+def max_steps_middleware(
+    max_steps: int = 20,
+) -> Middleware:
+    async def mw(
+        state: HarnessState,
+        ctx: HarnessContext,
+        next: Next,
+    ) -> HarnessState:
+        if state.step >= max_steps:
+            state.done = True
+
+            state.messages.append(
+                Message(
+                    role="assistant",
+                    content=(f"Stopped after {max_steps} steps."),
+                )
+            )
+
+            return state
+        return await next(state, ctx)
+    return mw
