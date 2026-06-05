@@ -25,6 +25,7 @@ from driven.core.schemas import (
     LlmToolFunction,
     Message,
     ToolCall,
+    Usage,
 )
 
 
@@ -50,6 +51,23 @@ class OpenAILlm(Llm):
                 )
 
             case "assistant":
+                tool_calls = message.metadata.get("tool_calls", [])
+                if tool_calls:
+                    return ChatCompletionAssistantMessageParam(
+                        role="assistant",
+                        content=message.content,
+                        tool_calls=[
+                            {
+                                "id": tc.get("id"),
+                                "type": "function",
+                                "function": {
+                                    "name": tc.get("name"),
+                                    "arguments": json.dumps(tc.get("arguments", {})),
+                                },
+                            }
+                            for tc in tool_calls
+                        ],
+                    )
                 return ChatCompletionAssistantMessageParam(
                     role="assistant",
                     content=message.content,
@@ -67,9 +85,15 @@ class OpenAILlm(Llm):
 
     def _convert_messages(
         self,
-        messages: list[Message],
+        request: LlmInput,
     ) -> list[ChatCompletionMessageParam]:
-        return [self._convert_message(msg) for msg in messages]
+        converted = [self._convert_message(msg) for msg in request.messages]
+        if request.system:
+            converted = [
+                ChatCompletionSystemMessageParam(role="system", content=request.system),
+                *converted,
+            ]
+        return converted
 
     def _convert_tools(
         self,
@@ -94,7 +118,7 @@ class OpenAILlm(Llm):
     async def generate_text(self, request: LlmInput) -> LlmTextResponse:
         response: ChatCompletion = await self.client.chat.completions.create(
             model=self.model,
-            messages=self._convert_messages(request.messages),
+            messages=self._convert_messages(request),
         )
 
         message = response.choices[0].message
@@ -110,7 +134,7 @@ class OpenAILlm(Llm):
     ) -> LlmStructuredResponse:
         response: ChatCompletion = await self.client.chat.completions.create(
             model=self.model,
-            messages=self._convert_messages(request.messages),
+            messages=self._convert_messages(request),
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -134,7 +158,7 @@ class OpenAILlm(Llm):
     ) -> LlmOutput:
         response: ChatCompletion = await self.client.chat.completions.create(
             model=self.model,
-            messages=self._convert_messages(request.messages),
+            messages=self._convert_messages(request),
             tools=self._convert_tools(tools),
             tool_choice="auto",
         )
@@ -142,21 +166,32 @@ class OpenAILlm(Llm):
         choice = response.choices[0]
         message = choice.message
 
+        usage = None
+        if response.usage:
+            usage = Usage(
+                input_tokens=response.usage.prompt_tokens or 0,
+                output_tokens=response.usage.completion_tokens or 0,
+                total_tokens=response.usage.total_tokens or 0,
+            )
+
         # tool calls
         if message.tool_calls:
-            tool_call = message.tool_calls[0]
-
-            # narrow type
-            if tool_call.type != "function":
-                raise RuntimeError(f"unsupported tool type: {tool_call.type}")
+            tool_calls: list[ToolCall] = []
+            for tool_call in message.tool_calls:
+                if tool_call.type != "function":
+                    raise RuntimeError(f"unsupported tool type: {tool_call.type}")
+                tool_calls.append(
+                    ToolCall(
+                        name=tool_call.function.name,
+                        arguments=json.loads(tool_call.function.arguments),
+                        call_id=tool_call.id,
+                    )
+                )
 
             return LlmOutput(
-                tool_call=ToolCall(
-                    name=tool_call.function.name,
-                    arguments=json.loads(tool_call.function.arguments),
-                    call_id=tool_call.id,
-                ),
+                tool_calls=tool_calls,
                 stop_reason=choice.finish_reason,
+                usage=usage,
                 raw=response.model_dump(),
             )
 
@@ -164,6 +199,7 @@ class OpenAILlm(Llm):
         return LlmOutput(
             content=message.content or "",
             stop_reason=choice.finish_reason,
+            usage=usage,
             raw=response.model_dump(),
         )
 
@@ -172,7 +208,7 @@ class OpenAILlm(Llm):
     ) -> AsyncIterator[LlmTextDelta]:
         stream = await self.client.chat.completions.create(
             model=self.model,
-            messages=self._convert_messages(request.messages),
+            messages=self._convert_messages(request),
             stream=True,
         )
 

@@ -1,5 +1,6 @@
 from functools import wraps
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+import time
 from typing import (
     Any,
     AsyncIterator,
@@ -7,55 +8,48 @@ from typing import (
     Callable,
     Optional,
     Protocol,
-    Sequence,
-    Union,
     runtime_checkable,
 )
 from uuid import uuid4
 
 from driven.core.schemas import (
-    AnyEvent,
-    AssistantResp,
-    JSONValue,
-    Message,
-    ActionEvent,
-    ObservationEvent,
-    CallToolAction,
-    LlmToolFunction,
+    AssistantFinalized,
+    ControllerRequested,
+    EventLogEntry,
     LlmInput,
-    LlmTextDelta,
-    LlmStructuredResponse,
-    LlmTextResponse,
     LlmOutput,
-    RespondAction,
-    ToolFailed,
-    ToolProduced,
+    LlmOutputReceived,
+    LlmRequestPrepared,
+    LlmStructuredResponse,
+    LlmTextDelta,
+    LlmTextResponse,
+    LlmToolFunction,
+    Message,
+    ToolCall,
+    ToolResult,
+    ToolsCompleted,
+    ToolsRequested,
+    TraceRecord,
+    TurnEvent,
+    TurnFinished,
 )
 
 
 @dataclass
 class HarnessState:
     state_id: str
-    prompt: str
+    system: str = ""
+    prompt: str = ""
     step: int = field(default=0)
     messages: list[Message] = field(default_factory=list)
-    # per-step
-    recent_actions: list[ActionEvent] = field(default_factory=list)
-    recent_observations: list[ObservationEvent] = field(default_factory=list)
-    actions_log: list[list[ActionEvent]] = field(default_factory=list)
-    observations_log: list[list[ObservationEvent]] = field(default_factory=list)
-    # Control
+    event_log: list[EventLogEntry] = field(default_factory=list)
     done: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
+    internal: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
 class Emitter(Protocol):
-    async def emit(
-        self,
-        event_type: str,
-        events: Union[dict, AnyEvent, Sequence[dict], Sequence[AnyEvent]],
-    ) -> None: ...
+    async def emit(self, event: dict[str, Any]) -> None: ...
 
 
 @runtime_checkable
@@ -77,34 +71,40 @@ class Runtime(Protocol):
     async def __aenter__(self) -> Any: ...
     async def __aexit__(self, exc_type, exc, tb): ...
     def get_tools(self, *args, **kwargs) -> list[LlmToolFunction]: ...
-    async def call_tool(
+    async def call_tools(
         self,
-        fn_name: str,
-        arguments: dict[str, JSONValue],
+        tools: list[ToolCall],
         state: HarnessState,
         llm: Llm,
         emitter: Optional[Emitter] = None,
         timeout: Optional[float] = None,
-    ) -> list[ObservationEvent]: ...
+    ) -> list[ToolResult]: ...
+
+
+CallTools = Callable[[list[ToolCall], Optional[float]], Awaitable[list[ToolResult]]]
 
 
 @runtime_checkable
 class Controller(Protocol):
-    """Decides the next action(s) given the current state."""
-
-    async def decide(
+    def stream_turn(
         self,
         messages: list[Message],
+        system: str,
         get_tools: Callable[..., list[LlmToolFunction]],
+        call_tools: CallTools,
         llm: Llm,
-        emitter: Optional[Emitter] = None,
-    ) -> list[ActionEvent]: ...
+    ) -> AsyncIterator[TurnEvent]: ...
 
 
 @runtime_checkable
 class StateManager(Protocol):
     async def load(self, run_id: str) -> HarnessState: ...
     async def save(self, state: HarnessState) -> HarnessState: ...
+
+
+@runtime_checkable
+class TraceSink(Protocol):
+    async def record(self, trace: TraceRecord) -> None: ...
 
 
 @dataclass
@@ -114,86 +114,226 @@ class HarnessContext:
     runtime: Runtime
     llm: Llm
     emitter: Optional[Emitter] = None
+    trace_sink: Optional[TraceSink] = None
 
 
-async def _handle_action(
-    state: HarnessState, ctx: HarnessContext, action: ActionEvent
-) -> list[ObservationEvent]:
-    match action:
-        case RespondAction(content):
-            return [AssistantResp(content)]
-        case CallToolAction(name, arguments, timeout):
-            return await ctx.runtime.call_tool(
-                name, arguments, state, ctx.llm, ctx.emitter, timeout
-            )
-        case _:
-            raise RuntimeError(f"unknown action type: {type(action)}")
+async def _emit(
+    ctx: HarnessContext,
+    state: HarnessState,
+    name: str,
+    payload: dict[str, Any],
+):
+    if not ctx.emitter:
+        return
+    await ctx.emitter.emit(
+        {
+            "source": "harness",
+            "name": name,
+            "timestamp": time.time(),
+            "run_id": state.state_id,
+            "step": state.step,
+            "payload": payload,
+        }
+    )
 
 
-async def _handle_observation(
-    observation: ObservationEvent,
-) -> tuple[list[Message], bool]:
-    match observation:
-        case AssistantResp(content):
-            msgs = [Message(role="assistant", content=content)]
-            return (msgs, True)
-        case ToolProduced(tool_name, content):
-            msgs = [
+def _messages_from_event(event: TurnEvent) -> tuple[list[Message], bool]:
+    match event:
+        case AssistantFinalized(content=content):
+            return [Message(role="assistant", content=content)], True
+
+        case ToolsRequested(tool_calls=tool_calls):
+            return [
                 Message(
-                    role="tool",
-                    name=tool_name,
-                    content=str(content),
+                    role="assistant",
+                    content="",
+                    metadata={
+                        "tool_calls": [
+                            {
+                                "id": tc.call_id,
+                                "name": tc.name,
+                                "arguments": tc.arguments,
+                            }
+                            for tc in tool_calls
+                        ]
+                    },
+                )
+            ], False
+
+        case ToolsCompleted(results=results):
+            out: list[Message] = []
+            for res in results:
+                if res.ok:
+                    content = str(res.content)
+                else:
+                    content = f"[{res.error_type}] {res.error_message}"
+                out.append(
+                    Message(
+                        role="tool",
+                        name=res.name,
+                        tool_call_id=res.call_id,
+                        content=content,
+                    )
+                )
+            return out, False
+
+        case TurnFinished(done=done):
+            return [], done
+
+        case ControllerRequested() | LlmRequestPrepared() | LlmOutputReceived():
+            return [], False
+
+        case _:
+            return [], False
+
+
+def _trace_records_from_event(
+    run_id: str,
+    step: int,
+    event: TurnEvent,
+) -> list[TraceRecord]:
+    match event:
+        case LlmRequestPrepared(request=request, timestamp=timestamp):
+            return [
+                TraceRecord(
+                    timestamp=timestamp,
+                    kind="llm_request",
+                    run_id=run_id,
+                    step=step,
+                    payload=asdict(request),
                 )
             ]
-            return (msgs, False)
 
-        case ToolFailed(tool_name, error_type, message):
-            msgs = [
-                Message(
-                    role="tool",
-                    name=tool_name,
-                    content=f"[{error_type}] {message}",
+        case LlmOutputReceived(output=output, timestamp=timestamp):
+            return [
+                TraceRecord(
+                    timestamp=timestamp,
+                    kind="llm_response",
+                    run_id=run_id,
+                    step=step,
+                    payload={
+                        "stop_reason": output.stop_reason,
+                        "tool_call_count": len(output.tool_calls),
+                        "content": output.content,
+                        "usage": asdict(output.usage) if output.usage else None,
+                        "raw": output.raw,
+                    },
                 )
             ]
-            return (msgs, False)
+
+        case ToolsRequested(
+            tool_calls=tool_calls, raw_llm_response=raw, timestamp=timestamp
+        ):
+            return [
+                TraceRecord(
+                    timestamp=timestamp,
+                    kind="tools_requested",
+                    run_id=run_id,
+                    step=step,
+                    payload={
+                        "tool_calls": [asdict(tc) for tc in tool_calls],
+                        "raw_llm_response": raw,
+                    },
+                )
+            ]
+
+        case ToolsCompleted(results=results, raw_llm_response=raw, timestamp=timestamp):
+            return [
+                TraceRecord(
+                    timestamp=timestamp,
+                    kind="tools_completed",
+                    run_id=run_id,
+                    step=step,
+                    payload={
+                        "results": [asdict(r) for r in results],
+                        "raw_llm_response": raw,
+                    },
+                )
+            ]
+
+        case AssistantFinalized(
+            content=content,
+            stop_reason=stop_reason,
+            usage=usage,
+            raw_llm_response=raw,
+            timestamp=timestamp,
+        ):
+            return [
+                TraceRecord(
+                    timestamp=timestamp,
+                    kind="assistant_finalized",
+                    run_id=run_id,
+                    step=step,
+                    payload={
+                        "content": content,
+                        "stop_reason": stop_reason,
+                        "usage": asdict(usage) if usage else None,
+                        "raw_llm_response": raw,
+                    },
+                )
+            ]
+
+        case TurnFinished(done=done, reason=reason, timestamp=timestamp):
+            return [
+                TraceRecord(
+                    timestamp=timestamp,
+                    kind="turn_finished",
+                    run_id=run_id,
+                    step=step,
+                    payload={"done": done, "reason": reason},
+                )
+            ]
+
+        case ControllerRequested(timestamp=timestamp):
+            return [
+                TraceRecord(
+                    timestamp=timestamp,
+                    kind="controller_requested",
+                    run_id=run_id,
+                    step=step,
+                    payload=event.get_as_event()["event"],
+                )
+            ]
 
         case _:
-            raise RuntimeError(f"unknown observation type: {type(observation)}")
+            return []
 
 
 async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
-    state.step += 1  # advance step
+    state.step += 1
 
-    actions = await ctx.controller.decide(
+    async def call_tools(
+        tool_calls: list[ToolCall],
+        timeout: Optional[float] = None,
+    ) -> list[ToolResult]:
+        return await ctx.runtime.call_tools(
+            tools=tool_calls,
+            state=state,
+            llm=ctx.llm,
+            emitter=ctx.emitter,
+            timeout=timeout,
+        )
+
+    async for event in ctx.controller.stream_turn(
         messages=state.messages,
+        system=state.system,
         get_tools=ctx.runtime.get_tools,
+        call_tools=call_tools,
         llm=ctx.llm,
-        emitter=ctx.emitter,
-    )
+    ):
+        event_entry = event.get_as_event()
+        state.event_log.append(event_entry)
 
-    observations: list[ObservationEvent] = []
+        if ctx.trace_sink:
+            for trace in _trace_records_from_event(state.state_id, state.step, event):
+                await ctx.trace_sink.record(trace)
 
-    if ctx.emitter and actions:
-        await ctx.emitter.emit("actions", actions)
+        await _emit(ctx, state, "turn_event", event_entry)
 
-    for action in actions:
-        _obs = await _handle_action(state, ctx, action)
-        observations.extend(_obs)
-
-    if ctx.emitter and observations:
-        await ctx.emitter.emit("observations", observations)
-
-    # update state
-    state.recent_actions = actions
-    state.recent_observations = observations
-    state.actions_log.append(actions)
-    state.observations_log.append(observations)
-
-    for event in observations:
-        messages, completed = await _handle_observation(event)
-        state.messages.extend(messages)
-
-        if completed:
+        msgs, done = _messages_from_event(event)
+        if msgs:
+            state.messages.extend(msgs)
+        if done:
             state.done = True
 
     return state
@@ -254,27 +394,46 @@ class Harness:
 
     async def run(
         self,
+        system: str,
+        prompt: str | list[Message],
         run_id: Optional[str] = None,
-        prompt: str = "",
-        input: list[Message] | None = None,
     ) -> tuple[Optional[HarnessState], Optional[Exception]]:
         rid = str(run_id or uuid4())
         state: Optional[HarnessState] = None
         try:
             state = await self.ctx.state_manager.load(rid)
+            state.system = system
 
-            # Inject initial prompt and input if this looks like a new state
-            if prompt:
+            await _emit(self.ctx, state, "run_started", {"run_id": state.state_id})
+
+            if isinstance(prompt, str):
                 state.prompt = prompt
                 state.messages.append(Message(role="user", content=prompt))
-            elif input:
-                state.messages.extend(input)
+            elif isinstance(prompt, list):
+                state.messages.extend(prompt)
             else:
-                raise ValueError("Either prompt or input must be provided")
+                raise ValueError("prompt must be str or list[Message]")
 
             state = await self.session_runner(state, self.ctx)
+
+            await _emit(
+                self.ctx,
+                state,
+                "run_ended",
+                {
+                    "run_id": state.state_id,
+                    "reason": "done" if state.done else "stopped",
+                },
+            )
             return state, None
         except Exception as e:
+            if state is not None:
+                await _emit(
+                    self.ctx,
+                    state,
+                    "run_failed",
+                    {"run_id": state.state_id, "error": str(e)},
+                )
             return state, e
         finally:
             if state is not None:

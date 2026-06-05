@@ -1,139 +1,96 @@
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import AsyncIterator, Callable
 
-from driven.core.harness import (
-    Controller,
-    Emitter,
-    Llm,
-)
+from driven.core.harness import CallTools, Controller, Llm
 from driven.core.schemas import (
-    ActionEvent,
-    CallToolAction,
+    AssistantFinalized,
+    ControllerRequested,
     LlmInput,
+    LlmOutputReceived,
+    LlmRequestPrepared,
     LlmToolFunction,
     Message,
-    RespondAction,
+    ToolsCompleted,
+    ToolsRequested,
+    TurnEvent,
+    TurnFinished,
 )
-
-
-DEFAULT_INSTRUCTIONS = """
-You are a helpful AI assistant.
-
-You may use tools when needed.
-
-Guidelines:
-- Use tools only when necessary.
-- Prefer direct answers when possible.
-- If a tool fails, explain the failure clearly.
-- Be concise but helpful.
-- Think step-by-step before using tools.
-- When the task is complete, respond normally.
-"""
 
 
 @dataclass
 class ToolCallingController(Controller):
-    instructions: str = DEFAULT_INSTRUCTIONS
-
-    append_system_message: bool = True
-
-    metadata: dict = field(default_factory=dict)
-
-    async def decide(
+    async def stream_turn(
         self,
         messages: list[Message],
+        system: str,
         get_tools: Callable[..., list[LlmToolFunction]],
+        call_tools: CallTools,
         llm: Llm,
-        emitter: Optional[Emitter] = None,
-    ) -> list[ActionEvent]:
+    ) -> AsyncIterator[TurnEvent]:
         tools = get_tools()
+        working_messages = list(messages)
 
-        request_messages = self._build_messages(messages)
-
-        request = LlmInput(
-            messages=request_messages,
-            metadata=self.metadata,
-        )
-
-
-        if emitter:
-            await emitter.emit(
-                "controller.request",
-                {
-                    "message_count": (len(request_messages)),
-                    "tool_count": len(tools),
-                },
+        while True:
+            yield ControllerRequested(
+                message_count=len(working_messages),
+                tool_count=len(tools),
             )
 
-        response = await llm.chat_with_tools(
-            request=request,
-            tools=tools,
-        )
+            request = LlmInput(system=system, messages=working_messages)
+            yield LlmRequestPrepared(request=request, tool_count=len(tools))
 
-        if emitter:
-            await emitter.emit(
-                "controller.response",
-                {
-                    "has_tool_call": (response.tool_call is not None),
-                    "has_content": (response.content is not None),
-                    "stop_reason": (response.stop_reason),
-                },
-            )
+            output = await llm.chat_with_tools(request=request, tools=tools)
+            yield LlmOutputReceived(output=output)
 
-        return self._convert_response_to_actions(
-            response=response,
-            emitter=emitter,
-        )
+            tool_calls = list(output.tool_calls)
 
-    # =========================
-    # INTERNALS
-    # =========================
-
-    def _build_messages(
-        self,
-        messages: list[Message],
-    ) -> list[Message]:
-        if not self.append_system_message:
-            return messages
-
-        system_message = Message(
-            role="system",
-            content=self.instructions,
-        )
-
-        return [
-            system_message,
-            *messages,
-        ]
-
-    def _convert_response_to_actions(
-        self,
-        response,
-        emitter: Optional[Emitter] = None,
-    ) -> list[ActionEvent]:
-        actions: list[ActionEvent] = []
-
-        # tool call
-        if response.tool_call:
-            if emitter:
-                # fire and forget style
-                # controller should not fail
-                # because telemetry failed
-                pass
-
-            actions.append(
-                CallToolAction(
-                    name=response.tool_call.name,
-                    arguments=(response.tool_call.arguments),
+            if tool_calls:
+                yield ToolsRequested(
+                    tool_calls=tool_calls,
+                    raw_llm_response=output.raw,
                 )
+
+                results = await call_tools(tool_calls, None)
+                yield ToolsCompleted(results=results, raw_llm_response=output.raw)
+
+                working_messages.append(
+                    Message(
+                        role="assistant",
+                        content="",
+                        metadata={
+                            "tool_calls": [
+                                {
+                                    "id": tc.call_id,
+                                    "name": tc.name,
+                                    "arguments": tc.arguments,
+                                }
+                                for tc in tool_calls
+                            ]
+                        },
+                    )
+                )
+
+                for result in results:
+                    if result.ok:
+                        content = str(result.content)
+                    else:
+                        content = f"[{result.error_type}] {result.error_message}"
+                    working_messages.append(
+                        Message(
+                            role="tool",
+                            name=result.name,
+                            tool_call_id=result.call_id,
+                            content=content,
+                        )
+                    )
+
+                continue
+
+            yield AssistantFinalized(
+                content=output.content or "No response generated.",
+                stop_reason=output.stop_reason,
+                usage=output.usage,
+                raw_llm_response=output.raw,
             )
-
-        # assistant response
-        if response.content:
-            actions.append(RespondAction(content=response.content))
-
-        # fallback
-        if not actions:
-            actions.append(RespondAction(content=("No response generated.")))
-
-        return actions
+            yield TurnFinished(done=True, reason="assistant_response")
+            return

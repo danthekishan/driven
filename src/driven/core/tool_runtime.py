@@ -9,9 +9,8 @@ from driven.core.harness import Emitter, HarnessState, Llm
 from driven.core.schemas import (
     JSONValue,
     LlmToolFunction,
-    ObservationEvent,
-    ToolFailed,
-    ToolProduced,
+    ToolCall,
+    ToolResult,
 )
 
 
@@ -69,7 +68,6 @@ def build_tool(func: Callable, metadata: dict[str, Any]) -> Tool:
         param for param in sig.parameters.values() if param.name not in ("self", "cls")
     ]
 
-    # build visible fields
     for param in params:
         if param.name in RUNTIME_PARAMS:
             runtime_params.add(param.name)
@@ -81,7 +79,6 @@ def build_tool(func: Callable, metadata: dict[str, Any]) -> Tool:
         else:
             fields[param.name] = (param_type, param.default)
 
-    # no input params
     if len(fields) == 0:
         args_schema = create_model(f"{metadata['name']}InputSchema")
         return Tool(
@@ -94,7 +91,6 @@ def build_tool(func: Callable, metadata: dict[str, Any]) -> Tool:
             runtime_params=runtime_params,
         )
 
-    # pydantic input mode
     if len(fields) == 1:
         first_param_type = list(fields.values())[0][0]
         if inspect.isclass(first_param_type) and issubclass(
@@ -110,7 +106,6 @@ def build_tool(func: Callable, metadata: dict[str, Any]) -> Tool:
                 runtime_params=runtime_params,
             )
 
-    # generated schema
     args_schema = create_model(f"{metadata['name']}InputSchema", **fields)
     return Tool(
         func=func,
@@ -163,21 +158,9 @@ class Extension:
             self.tools[tool_obj.name] = tool_obj
 
     async def start(self):
-        """
-        Setup resources.
-
-        Examples:
-            - database connections
-            - websocket sessions
-            - background workers
-            - API clients
-        """
         pass
 
     async def stop(self):
-        """
-        Cleanup resources.
-        """
         pass
 
 
@@ -222,14 +205,11 @@ class ExtensionRegistry:
                 await extension.start()
                 return
 
-            # cancellation must propagate
             except asyncio.CancelledError:
                 raise
 
-            # retryable failure
             except Exception as e:
                 last_exception = e
-
                 print(
                     f"[registry] failed to start "
                     f"extension='{extension.name}' "
@@ -238,17 +218,14 @@ class ExtensionRegistry:
                     f"error={e}"
                 )
 
-                # cleanup partial resources
                 try:
                     await extension.stop()
                 except Exception:
                     pass
 
-                # retry
                 if attempt < self.max_start_attempts:
                     await asyncio.sleep(self.retry_delay)
 
-        # failed after all retries
         raise RuntimeError(
             f"Failed to start extension "
             f"'{extension.name}' "
@@ -261,11 +238,9 @@ class ExtensionRegistry:
         if extension.name in self.extensions:
             raise RuntimeError(f"Extension '{extension.name}' already registered")
 
-        # start extension first
         await self._start_extension(extension)
         self.extensions[extension.name] = extension
 
-        # register tools
         for local_name, tool_obj in extension.tools.items():
             full_name = f"{extension.name}-{local_name}"
 
@@ -276,7 +251,6 @@ class ExtensionRegistry:
                 extension_name=(extension.name), tool=tool_obj
             )
 
-    # TOOL SCHEMAS
     def get_tools(
         self, extension_name: (Optional[str]) = None
     ) -> list[LlmToolFunction]:
@@ -287,37 +261,50 @@ class ExtensionRegistry:
             tools.append(registered.tool.get_schema(full_name=full_name))
         return tools
 
-    async def call_tool(
+    async def call_tools(
         self,
-        fn_name: str,
-        arguments: dict[str, JSONValue],
+        tools: list[ToolCall],
         state: Optional[HarnessState],
         llm: Optional[Llm],
         emitter: (Optional[Emitter]) = None,
         timeout: Optional[float] = None,
-    ) -> list[ObservationEvent]:
-        try:
-            registered = self.tools.get(fn_name)
-            if registered is None:
-                raise RuntimeError(f"Unknown tool '{fn_name}'")
+    ) -> list[ToolResult]:
+        async def _run_one(call: ToolCall) -> ToolResult:
+            try:
+                registered = self.tools.get(call.name)
+                if registered is None:
+                    raise RuntimeError(f"Unknown tool '{call.name}'")
 
-            async with asyncio.timeout(timeout):
                 result = await registered.tool.run(
-                    arguments,
+                    call.arguments,
                     runtime_context={"state": state, "llm": llm, "emitter": emitter},
                 )
-                return [ToolProduced(tool_name=fn_name, content=result)]
-
-        except TimeoutError as e:
-            return [
-                ToolFailed(
-                    tool_name=fn_name, error_type=(type(e).__name__), message=str(e)
+                return ToolResult(
+                    name=call.name,
+                    ok=True,
+                    content=result,
+                    call_id=call.call_id,
                 )
-            ]
-
-        except Exception as e:
-            return [
-                ToolFailed(
-                    tool_name=fn_name, error_type=(type(e).__name__), message=str(e)
+            except Exception as e:
+                return ToolResult(
+                    name=call.name,
+                    ok=False,
+                    call_id=call.call_id,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
                 )
+
+        try:
+            async with asyncio.timeout(timeout):
+                return await asyncio.gather(*[_run_one(call) for call in tools])
+        except TimeoutError:
+            return [
+                ToolResult(
+                    name=call.name,
+                    ok=False,
+                    call_id=call.call_id,
+                    error_type="TimeoutError",
+                    error_message="tool batch timed out",
+                )
+                for call in tools
             ]

@@ -1,4 +1,6 @@
 import asyncio
+from dataclasses import asdict
+import json
 import os
 
 from dotenv import load_dotenv
@@ -45,12 +47,11 @@ class InMemoryStateManager(StateManager):
 
 
 class PrintEmitter(Emitter):
-    async def emit(self, event_type, events) -> None:
-        if isinstance(events, (list, tuple)):
-            for event in events:
-                print(f"[{event_type}] {event}")
-        else:
-            print(f"[{event_type}] {events}")
+    async def emit(self, event: dict) -> None:
+        source = event.get("source", "unknown")
+        name = event.get("name", "event")
+        payload = event.get("payload", {})
+        print(f"[{source}.{name}] {payload}")
 
 
 async def main():
@@ -68,24 +69,7 @@ async def main():
     # CONTROLLER
     # =========================
 
-    controller = ToolCallingController(
-        instructions="""
-You are a coding assistant.
-
-You can:
-- read files
-- write files
-- search files
-- run shell commands
-
-Rules:
-- Use tools when needed.
-- Read files before editing them.
-- Avoid destructive shell commands.
-- Be concise.
-- When finished, respond normally.
-"""
-    )
+    controller = ToolCallingController()
 
     # =========================
     # CONTEXT
@@ -113,6 +97,7 @@ Rules:
         session_middlewares=[lifecycle_session_middleware(run_id="run-1")],
     ) as harness:
         state, error = await harness.run(
+            system="",
             run_id="run-1",
             prompt=("Create a hello.py file that prints hello world, then run it."),
         )
@@ -138,6 +123,12 @@ Rules:
             for msg in state.messages:
                 print(f"[{msg.role}] {msg.content}")
                 print()
+
+    print("====================")
+    if state:
+        with open("xxx.json", "w") as f:
+            f.write(json.dumps(asdict(state), indent=2))
+    print("====================")
 
 
 if __name__ == "__main__":

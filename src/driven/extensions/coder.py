@@ -1,6 +1,7 @@
 import asyncio
 import difflib
 from pathlib import Path
+import time
 from typing import Optional
 
 from pydantic import BaseModel
@@ -232,11 +233,17 @@ class CoderExtension(Extension):
     ) -> dict:
         if emitter:
             await emitter.emit(
-                "command.started",
                 {
-                    "command": input.command,
-                    "cwd": input.cwd,
-                },
+                    "source": "extension.coder",
+                    "name": "command_started",
+                    "timestamp": time.time(),
+                    "run_id": "",
+                    "step": -1,
+                    "payload": {
+                        "command": input.command,
+                        "cwd": input.cwd,
+                    },
+                }
             )
 
         cwd = self._resolve_path(input.cwd)
@@ -269,8 +276,14 @@ class CoderExtension(Extension):
 
         if emitter:
             await emitter.emit(
-                "command.completed",
-                result,
+                {
+                    "source": "extension.coder",
+                    "name": "command_completed",
+                    "timestamp": time.time(),
+                    "run_id": "",
+                    "step": -1,
+                    "payload": result,
+                }
             )
 
         return result

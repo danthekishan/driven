@@ -15,6 +15,7 @@ from driven.core.schemas import (
     LlmToolFunction,
     Message,
     ToolCall,
+    Usage,
 )
 
 
@@ -58,6 +59,21 @@ class AnthropicLlm(Llm):
                 }
 
             case "assistant":
+                tool_calls = message.metadata.get("tool_calls", [])
+                if tool_calls:
+                    return {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": tc.get("id") or "unknown_tool_call",
+                                "name": tc.get("name") or "unknown_tool",
+                                "input": tc.get("arguments", {}),
+                            }
+                            for tc in tool_calls
+                        ],
+                    }
+
                 return {
                     "role": "assistant",
                     "content": message.content,
@@ -86,11 +102,16 @@ class AnthropicLlm(Llm):
                 raise RuntimeError(f"unsupported role: {message.role}")
 
     def _convert_messages(
-        self, messages: list[Message]
+        self, request: LlmInput
     ) -> tuple[Optional[str], list[MessageParam]]:
-        system, non_system = self._extract_system_message(messages)
+        system_from_messages, non_system = self._extract_system_message(request.messages)
+        combined_system = request.system or ""
+        if system_from_messages:
+            combined_system = (
+                f"{combined_system}\n\n{system_from_messages}" if combined_system else system_from_messages
+            )
         converted = [self._convert_message(msg) for msg in non_system]
-        return system, converted
+        return (combined_system or None), converted
 
     def _convert_tools(self, tools: list[LlmToolFunction]) -> list[ToolParam]:
         converted: list[ToolParam] = []
@@ -116,7 +137,7 @@ class AnthropicLlm(Llm):
         return "".join(parts)
 
     async def generate_text(self, request: LlmInput) -> LlmTextResponse:
-        system, messages = self._convert_messages(request.messages)
+        system, messages = self._convert_messages(request)
         response: AnthropicMessage = await self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -124,16 +145,28 @@ class AnthropicLlm(Llm):
             messages=messages,
         )
 
+        usage = None
+        if response.usage:
+            usage = Usage(
+                input_tokens=getattr(response.usage, "input_tokens", 0) or 0,
+                output_tokens=getattr(response.usage, "output_tokens", 0) or 0,
+                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                cache_write_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                total_tokens=(getattr(response.usage, "input_tokens", 0) or 0)
+                + (getattr(response.usage, "output_tokens", 0) or 0),
+            )
+
         return LlmTextResponse(
             content=self._extract_text(response),
             stop_reason=response.stop_reason,
+            usage=usage,
             raw=response.model_dump(),
         )
 
     async def generate_structured(
         self, request: LlmInput, schema: dict
     ) -> LlmStructuredResponse:
-        system, messages = self._convert_messages(request.messages)
+        system, messages = self._convert_messages(request)
 
         schema_instruction = (
             "You must respond with valid JSON "
@@ -155,16 +188,28 @@ class AnthropicLlm(Llm):
 
         text = self._extract_text(response)
 
+        usage = None
+        if response.usage:
+            usage = Usage(
+                input_tokens=getattr(response.usage, "input_tokens", 0) or 0,
+                output_tokens=getattr(response.usage, "output_tokens", 0) or 0,
+                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                cache_write_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                total_tokens=(getattr(response.usage, "input_tokens", 0) or 0)
+                + (getattr(response.usage, "output_tokens", 0) or 0),
+            )
+
         return LlmStructuredResponse(
             data=json.loads(text),
             stop_reason=response.stop_reason,
+            usage=usage,
             raw=response.model_dump(),
         )
 
     async def chat_with_tools(
         self, request: LlmInput, tools: list[LlmToolFunction]
     ) -> LlmOutput:
-        system, messages = self._convert_messages(request.messages)
+        system, messages = self._convert_messages(request)
         response: AnthropicMessage = await self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -173,32 +218,48 @@ class AnthropicLlm(Llm):
             tools=self._convert_tools(tools),
         )
 
-        # anthropic content blocks
+        usage = None
+        if response.usage:
+            usage = Usage(
+                input_tokens=getattr(response.usage, "input_tokens", 0) or 0,
+                output_tokens=getattr(response.usage, "output_tokens", 0) or 0,
+                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                cache_write_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                total_tokens=(getattr(response.usage, "input_tokens", 0) or 0)
+                + (getattr(response.usage, "output_tokens", 0) or 0),
+            )
+
+        tool_calls: list[ToolCall] = []
         for block in response.content:
             if block.type == "tool_use":
-                return LlmOutput(
-                    tool_call=ToolCall(
+                tool_calls.append(
+                    ToolCall(
                         name=block.name,
-                        arguments=(
-                            block.input if isinstance(block.input, dict) else {}
-                        ),
+                        arguments=(block.input if isinstance(block.input, dict) else {}),
                         call_id=block.id,
-                    ),
-                    stop_reason=response.stop_reason,
-                    raw=response.model_dump(),
+                    )
                 )
+
+        if tool_calls:
+            return LlmOutput(
+                tool_calls=tool_calls,
+                stop_reason=response.stop_reason,
+                usage=usage,
+                raw=response.model_dump(),
+            )
 
         # normal text response
         return LlmOutput(
             content=self._extract_text(response),
             stop_reason=response.stop_reason,
+            usage=usage,
             raw=response.model_dump(),
         )
 
     async def generate_text_stream(  # type: ignore
         self, request: LlmInput
     ) -> AsyncIterator[LlmTextDelta]:
-        system, messages = self._convert_messages(request.messages)
+        system, messages = self._convert_messages(request)
 
         async with self.client.messages.stream(
             model=self.model,
