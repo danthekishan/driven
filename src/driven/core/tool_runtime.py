@@ -267,7 +267,7 @@ class ExtensionRegistry:
 
         # register tools
         for local_name, tool_obj in extension.tools.items():
-            full_name = f"{extension.name}.{local_name}"
+            full_name = f"{extension.name}-{local_name}"
 
             if full_name in self.tools:
                 raise RuntimeError(f"Duplicate tool '{full_name}'")
