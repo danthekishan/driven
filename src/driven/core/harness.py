@@ -257,7 +257,7 @@ class Harness:
         run_id: Optional[str] = None,
         prompt: str = "",
         input: list[Message] | None = None,
-    ):
+    ) -> tuple[Optional[HarnessState], Optional[Exception]]:
         rid = str(run_id or uuid4())
         state: Optional[HarnessState] = None
         try:
@@ -273,7 +273,9 @@ class Harness:
                 raise ValueError("Either prompt or input must be provided")
 
             state = await self.session_runner(state, self.ctx)
-            return state
+            return state, None
+        except Exception as e:
+            return state, e
         finally:
             if state is not None:
                 await self.ctx.state_manager.save(state)
