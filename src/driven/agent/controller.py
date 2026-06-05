@@ -55,6 +55,7 @@ class ToolCallingController(Controller):
             metadata=self.metadata,
         )
 
+
         if emitter:
             await emitter.emit(
                 "controller.request",
