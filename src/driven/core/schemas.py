@@ -23,6 +23,9 @@ class Message:
 @dataclass(frozen=True)
 class RespondAction:
     content: str
+    stop_reason: Optional[str] = None
+    usage: dict[str, Any] = field(default_factory=dict)
+    raw_llm_response: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,10 @@ class CallToolAction:
     name: str
     arguments: dict[str, JSONValue] = field(default_factory=dict)
     timeout: Optional[float] = None
+    tool_call_id: Optional[str] = None
+    stop_reason: Optional[str] = None
+    usage: dict[str, Any] = field(default_factory=dict)
+    raw_llm_response: dict[str, Any] = field(default_factory=dict)
 
 
 ActionEvent = Union[RespondAction, CallToolAction]
@@ -133,3 +140,43 @@ class LlmOutput:
     tool_call: Optional[ToolCall] = None
     stop_reason: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def convert_to_actions(self) -> list[ActionEvent]:
+        actions: list[ActionEvent] = []
+
+        # tool call
+        if self.tool_call:
+            actions.append(
+                CallToolAction(
+                    name=self.tool_call.name,
+                    arguments=(self.tool_call.arguments),
+                    tool_call_id=self.tool_call.call_id,
+                    stop_reason=self.stop_reason,
+                    usage=self.raw.get("usage", {}),
+                    raw_llm_response=self.raw,
+                )
+            )
+
+        # assistant response
+        if self.content:
+            actions.append(
+                RespondAction(
+                    content=self.content,
+                    stop_reason=self.stop_reason,
+                    usage=self.raw.get("usage", {}),
+                    raw_llm_response=self.raw,
+                )
+            )
+
+        # fallback
+        if not actions:
+            actions.append(
+                RespondAction(
+                    content=("No response generated."),
+                    stop_reason=self.stop_reason,
+                    usage=self.raw.get("usage", {}),
+                    raw_llm_response=self.raw,
+                )
+            )
+
+        return actions
