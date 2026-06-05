@@ -24,7 +24,7 @@ class Message:
 class RespondAction:
     content: str
     stop_reason: Optional[str] = None
-    usage: dict[str, Any] = field(default_factory=dict)
+    usage: Optional["Usage"] = None
     raw_llm_response: dict[str, Any] = field(default_factory=dict)
 
 
@@ -35,7 +35,7 @@ class CallToolAction:
     timeout: Optional[float] = None
     tool_call_id: Optional[str] = None
     stop_reason: Optional[str] = None
-    usage: dict[str, Any] = field(default_factory=dict)
+    usage: Optional["Usage"] = None
     raw_llm_response: dict[str, Any] = field(default_factory=dict)
 
 
@@ -139,6 +139,7 @@ class LlmOutput:
     content: Optional[str] = None
     tool_call: Optional[ToolCall] = None
     stop_reason: Optional[str] = None
+    usage: Optional[Usage] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     def convert_to_actions(self) -> list[ActionEvent]:
@@ -152,7 +153,7 @@ class LlmOutput:
                     arguments=(self.tool_call.arguments),
                     tool_call_id=self.tool_call.call_id,
                     stop_reason=self.stop_reason,
-                    usage=self.raw.get("usage", {}),
+                    usage=self.usage,
                     raw_llm_response=self.raw,
                 )
             )
@@ -163,7 +164,7 @@ class LlmOutput:
                 RespondAction(
                     content=self.content,
                     stop_reason=self.stop_reason,
-                    usage=self.raw.get("usage", {}),
+                    usage=self.usage,
                     raw_llm_response=self.raw,
                 )
             )
@@ -174,7 +175,7 @@ class LlmOutput:
                 RespondAction(
                     content=("No response generated."),
                     stop_reason=self.stop_reason,
-                    usage=self.raw.get("usage", {}),
+                    usage=self.usage,
                     raw_llm_response=self.raw,
                 )
             )
