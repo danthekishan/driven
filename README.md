@@ -19,8 +19,8 @@ it provides the orchestration layer: protocols, schemas, a composable execution 
 | `StateManager` (protocol) | persists and recovers state |
 | `Llm` (protocol) | talks to a language model |
 | `Emitter` (protocol) | observes events |
-| `TraceSink` (protocol) | records execution traces |
-| `Extension` / `@tool` | base class and decorator for building tool groups |
+| `Extension` / `@tool()` | base class and decorator for building tool groups |
+| `SubAgent` | extension that spawns branches with private tools |
 | `ExtensionRegistry` | manages extension lifecycle, registration, and parallel execution |
 | middlewares | intercept hooks for compaction, limits, retries, logging, etc. |
 
@@ -28,10 +28,11 @@ it provides the orchestration layer: protocols, schemas, a composable execution 
 
 driven ships no tools, no extensions, no LLM clients. those belong to your application.
 
-the framework gives you the `Extension` base class and `@tool` decorator to define your own:
+the framework gives you the `Extension` base class and `@tool()` decorator to define your own:
 
 ```python
-from driven.core.tool_runtime import Extension, tool
+from driven.core.tool_runtime import Extension
+from driven.core.tool import tool
 from pydantic import BaseModel
 
 class SearchInput(BaseModel):
@@ -65,6 +66,39 @@ async with Agent(
 
 everything explicit. nothing hidden. you see every component that's wired in.
 
+## branches and sub-agents
+
+the harness supports **branching** — spawning a separate execution run from within a tool call. branches get their own state and middleware chain, but share the parent's services (LLM, emitter).
+
+`SubAgent` is an `Extension` that uses branching to spawn isolated agent runs with **private tools** — tools the parent agent never sees:
+
+```python
+from driven.core.tool_runtime import SubAgent
+from driven.core.tool import tool
+from driven.core.harness import HarnessState, SpawnBranch
+
+class CodingAgent(SubAgent):
+    name = "coding-agent"
+    description = "Spawns a coding agent to perform tasks."
+    private_extensions = [CoderExtension(workspace="./workspace")]
+
+    @tool(description="Run a coding task", public=True)
+    async def run(self, input: CodeTaskInput, state: HarnessState, spawn_branch: SpawnBranch) -> dict:
+        branch_state, error = await self.branch(
+            spawn_branch=spawn_branch,
+            parent_state=state,
+            prompt=input.task,
+            system="You are a coding agent. Perform the task using available tools.",
+        )
+        ...
+```
+
+- **public tools** (`@tool(public=True)`) — visible to the parent agent, appear as the sub-agent's interface
+- **private tools** (`@tool()`) — only visible inside the branch, come from `private_extensions`
+- the parent agent sees only the sub-agent's public tools — it delegates, the branch executes
+
+branch events carry metadata (`branch_id`, `parent_run_id`, `parent_step`, `label`) so you can trace the hierarchy.
+
 ## architecture
 
 ```
@@ -87,7 +121,11 @@ everything explicit. nothing hidden. you see every component that's wired in.
                               └────────┬────────┘
                                        │
                               ┌────────┴────────┐
-                              │   Extensions     │  you own these
+                              │   Extensions    │  you own these
+                              └────────┬────────┘
+                                       │
+                              ┌────────┴────────┐
+                              │  SubAgent (branch)│  private tools, own state
                               └─────────────────┘
 ```
 
@@ -111,9 +149,9 @@ the boundary between the harness and the outside world. discovers available tool
 
 `ExtensionRegistry` is the provided implementation:
 
-- **extensions** are scoped, named groups of tools — each with a lifecycle (`start`/`stop`) and auto-discovered `@tool`-decorated methods
+- **extensions** are scoped, named groups of tools — each with a lifecycle (`start`/`stop`) and auto-discovered `@tool()`-decorated methods
 - the registry manages extension lifecycle, tool registration, and parallel execution
-- tools can receive runtime context (`state`, `llm`, `emitter`) via parameter injection — no coupling
+- tools can receive runtime context (`state`, `llm`, `emitter`, `spawn_branch`) via parameter injection — no coupling
 - can be extended to share resources (clients, connection pools) across extensions
 
 a runtime can be local (extensions in-process), remote, or anything else. the harness doesn't know or care.
@@ -131,6 +169,21 @@ middlewares wrap the execution loop, giving you intercept points without modifyi
 
 they compose. they're explicit. there are no hidden defaults.
 
+## examples
+
+```bash
+# number guessing game — agent uses extension tools directly
+uv run python examples/main.py --name number-guess
+
+# coding agent — SubAgent with private CoderExtension tools
+uv run python examples/main.py --name coding-agent
+```
+
+| example | what it shows |
+|---|---|
+| `number-guess` | agent plays a game using `NumberGuessExtension` tools directly |
+| `coding-agent` | `CodingAgent` SubAgent — parent sees 1 tool, branch gets 7 private coder tools |
+
 ## design principles
 
 - **protocol over implementation** — contracts first, fill in later
@@ -138,10 +191,6 @@ they compose. they're explicit. there are no hidden defaults.
 - **extendability over convenience** — the framework provides hooks, not opinions
 - **decoupling over integration** — harness doesn't know about tools; runtime doesn't know about orchestration
 - **minimal until proven otherwise** — add complexity when real needs emerge, not in anticipation
-
-## examples
-
-- [`examples/minimal_coder/`](examples/minimal_coder/) — minimal agent using the coder extension with OpenAI
 
 ## status
 
