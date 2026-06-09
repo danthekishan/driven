@@ -104,6 +104,16 @@ class LlmOutput:
     raw: ProviderRaw = field(default_factory=dict)
 
 
+# ---------- Branch ----------
+@dataclass(frozen=True)
+class BranchInfo:
+    branch_id: str
+    parent_run_id: str
+    parent_step: int
+    spawned_at: float
+    label: str = ""
+
+
 # ---------- Trace ----------
 @dataclass(frozen=True)
 class TraceRecord:

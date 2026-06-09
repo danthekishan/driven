@@ -14,7 +14,7 @@ from driven.core.schemas import (
 )
 
 
-RUNTIME_PARAMS = {"state", "llm", "emitter"}
+RUNTIME_PARAMS = {"state", "llm", "emitter", "spawn_branch"}
 
 
 class Tool(BaseModel):
@@ -268,6 +268,7 @@ class ExtensionRegistry:
         llm: Optional[Llm],
         emitter: (Optional[Emitter]) = None,
         timeout: Optional[float] = None,
+        spawn_branch: Optional[Callable] = None,
     ) -> list[ToolResult]:
         async def _run_one(call: ToolCall) -> ToolResult:
             try:
@@ -277,7 +278,12 @@ class ExtensionRegistry:
 
                 result = await registered.tool.run(
                     call.arguments,
-                    runtime_context={"state": state, "llm": llm, "emitter": emitter},
+                    runtime_context={
+                        "state": state,
+                        "llm": llm,
+                        "emitter": emitter,
+                        "spawn_branch": spawn_branch,
+                    },
                 )
                 return ToolResult(
                     name=call.name,

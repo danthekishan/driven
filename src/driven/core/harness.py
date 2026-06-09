@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from driven.core.schemas import (
     AssistantFinalized,
+    BranchInfo,
     ControllerRequested,
     EventLogEntry,
     LlmInput,
@@ -45,6 +46,8 @@ class HarnessState:
     event_log: list[EventLogEntry] = field(default_factory=list)
     done: bool = False
     internal: dict[str, Any] = field(default_factory=dict)
+    branch: Optional[BranchInfo] = None
+    branches: list[BranchInfo] = field(default_factory=list)
 
 
 @runtime_checkable
@@ -66,6 +69,12 @@ class Llm(Protocol):
     ) -> AsyncIterator[LlmTextDelta]: ...
 
 
+SpawnBranch = Callable[
+    ...,
+    Awaitable[tuple[Optional["HarnessState"], Optional[Exception]]],
+]
+
+
 @runtime_checkable
 class Runtime(Protocol):
     async def __aenter__(self) -> Any: ...
@@ -78,6 +87,7 @@ class Runtime(Protocol):
         llm: Llm,
         emitter: Optional[Emitter] = None,
         timeout: Optional[float] = None,
+        spawn_branch: Optional[SpawnBranch] = None,
     ) -> list[ToolResult]: ...
 
 
@@ -302,6 +312,52 @@ def _trace_records_from_event(
 async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
     state.step += 1
 
+    async def spawn_branch(
+        parent_state: HarnessState,
+        prompt: str | list[Message],
+        label: str = "",
+        system: str = "",
+        middlewares: Middlewares = [],
+        session_middlewares: Middlewares = [],
+    ) -> tuple[Optional[HarnessState], Optional[Exception]]:
+        branch_id = f"{parent_state.state_id}::{label or str(uuid4())}"
+        branch_info = BranchInfo(
+            branch_id=branch_id,
+            parent_run_id=parent_state.state_id,
+            parent_step=parent_state.step,
+            spawned_at=time.time(),
+            label=label,
+        )
+        parent_state.branches.append(branch_info)
+
+        branch_state: Optional[HarnessState] = None
+        try:
+            branch_state = await ctx.state_manager.load(branch_id)
+            branch_state.branch = branch_info
+            branch_state.system = system
+
+            if isinstance(prompt, str):
+                branch_state.prompt = prompt
+                branch_state.messages.append(Message(role="user", content=prompt))
+            elif isinstance(prompt, list):
+                branch_state.messages.extend(prompt)
+
+            branch_step_runner = build_chain(middlewares, _run) if middlewares else _run
+
+            async def _branch_session(state: HarnessState, ctx: HarnessContext) -> HarnessState:
+                return await _run_loop(state, ctx, branch_step_runner)
+
+            branch_session_runner = build_chain(session_middlewares, _branch_session) if session_middlewares else _branch_session
+
+            branch_state = await branch_session_runner(branch_state, ctx)
+
+            return branch_state, None
+        except Exception as e:
+            return branch_state, e
+        finally:
+            if branch_state is not None:
+                await ctx.state_manager.save(branch_state)
+
     async def call_tools(
         tool_calls: list[ToolCall],
         timeout: Optional[float] = None,
@@ -312,6 +368,7 @@ async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
             llm=ctx.llm,
             emitter=ctx.emitter,
             timeout=timeout,
+            spawn_branch=spawn_branch,
         )
 
     async for event in ctx.controller.stream_turn(
@@ -368,6 +425,17 @@ def build_chain(middlewares: Middlewares, handler: Next) -> Next:
     return chain
 
 
+async def _run_loop(
+    state: HarnessState,
+    ctx: HarnessContext,
+    step_runner: Next,
+) -> HarnessState:
+    while not state.done:
+        state = await step_runner(state, ctx)
+
+    return state
+
+
 class Harness:
     def __init__(
         self,
@@ -377,7 +445,11 @@ class Harness:
     ):
         self.ctx = ctx
         self.step_runner = build_chain(step_middlewares, _run)
-        self.session_runner = build_chain(session_middlewares, self._run_loop)
+
+        async def _session_loop(state: HarnessState, ctx: HarnessContext) -> HarnessState:
+            return await _run_loop(state, ctx, self.step_runner)
+
+        self.session_runner = build_chain(session_middlewares, _session_loop)
 
     async def __aenter__(self):
         await self.ctx.runtime.__aenter__()
@@ -385,12 +457,6 @@ class Harness:
 
     async def __aexit__(self, exc_type, exc, tb):
         await self.ctx.runtime.__aexit__(exc_type, exc, tb)
-
-    async def _run_loop(self, state: HarnessState, ctx: HarnessContext):
-        while not state.done:
-            state = await self.step_runner(state, ctx)
-
-        return state
 
     async def run(
         self,
