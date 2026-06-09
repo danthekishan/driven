@@ -7,7 +7,8 @@ from typing import Optional
 from pydantic import BaseModel
 
 from driven.core.harness import Emitter
-from driven.core.tool_runtime import Extension, tool
+from driven.core.tool import tool
+from driven.core.tool_runtime import Extension
 
 
 class ReadFileInput(BaseModel):

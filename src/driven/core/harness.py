@@ -125,6 +125,7 @@ class HarnessContext:
     llm: Llm
     emitter: Optional[Emitter] = None
     trace_sink: Optional[TraceSink] = None
+    private_of: Optional[str] = None
 
 
 async def _emit(
@@ -135,16 +136,22 @@ async def _emit(
 ):
     if not ctx.emitter:
         return
-    await ctx.emitter.emit(
-        {
-            "source": "harness",
-            "name": name,
-            "timestamp": time.time(),
-            "run_id": state.state_id,
-            "step": state.step,
-            "payload": payload,
+    event: dict[str, Any] = {
+        "source": "harness",
+        "name": name,
+        "timestamp": time.time(),
+        "run_id": state.state_id,
+        "step": state.step,
+        "payload": payload,
+    }
+    if state.branch:
+        event["branch"] = {
+            "branch_id": state.branch.branch_id,
+            "parent_run_id": state.branch.parent_run_id,
+            "parent_step": state.branch.parent_step,
+            "label": state.branch.label,
         }
-    )
+    await ctx.emitter.emit(event)
 
 
 def _messages_from_event(event: TurnEvent) -> tuple[list[Message], bool]:
@@ -319,6 +326,7 @@ async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
         system: str = "",
         middlewares: Middlewares = [],
         session_middlewares: Middlewares = [],
+        private_of: Optional[str] = None,
     ) -> tuple[Optional[HarnessState], Optional[Exception]]:
         branch_id = f"{parent_state.state_id}::{label or str(uuid4())}"
         branch_info = BranchInfo(
@@ -330,9 +338,19 @@ async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
         )
         parent_state.branches.append(branch_info)
 
+        branch_ctx = HarnessContext(
+            state_manager=ctx.state_manager,
+            controller=ctx.controller,
+            runtime=ctx.runtime,
+            llm=ctx.llm,
+            emitter=ctx.emitter,
+            trace_sink=ctx.trace_sink,
+            private_of=private_of,
+        )
+
         branch_state: Optional[HarnessState] = None
         try:
-            branch_state = await ctx.state_manager.load(branch_id)
+            branch_state = await branch_ctx.state_manager.load(branch_id)
             branch_state.branch = branch_info
             branch_state.system = system
 
@@ -342,6 +360,11 @@ async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
             elif isinstance(prompt, list):
                 branch_state.messages.extend(prompt)
 
+            await _emit(
+                branch_ctx, branch_state, "branch_started",
+                {"branch_id": branch_id, "label": label, "parent_run_id": parent_state.state_id, "parent_step": parent_state.step},
+            )
+
             branch_step_runner = build_chain(middlewares, _run) if middlewares else _run
 
             async def _branch_session(state: HarnessState, ctx: HarnessContext) -> HarnessState:
@@ -349,10 +372,20 @@ async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
 
             branch_session_runner = build_chain(session_middlewares, _branch_session) if session_middlewares else _branch_session
 
-            branch_state = await branch_session_runner(branch_state, ctx)
+            branch_state = await branch_session_runner(branch_state, branch_ctx)
+
+            await _emit(
+                branch_ctx, branch_state, "branch_ended",
+                {"branch_id": branch_id, "reason": "done" if branch_state.done else "stopped"},
+            )
 
             return branch_state, None
         except Exception as e:
+            if branch_state is not None:
+                await _emit(
+                    branch_ctx, branch_state, "branch_failed",
+                    {"branch_id": branch_id, "error": str(e)},
+                )
             return branch_state, e
         finally:
             if branch_state is not None:
@@ -371,10 +404,13 @@ async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
             spawn_branch=spawn_branch,
         )
 
+    def get_tools() -> list[LlmToolFunction]:
+        return ctx.runtime.get_tools(private_of=ctx.private_of)
+
     async for event in ctx.controller.stream_turn(
         messages=state.messages,
         system=state.system,
-        get_tools=ctx.runtime.get_tools,
+        get_tools=get_tools,
         call_tools=call_tools,
         llm=ctx.llm,
     ):

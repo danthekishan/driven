@@ -1,138 +1,9 @@
 import asyncio
-import inspect
-from dataclasses import dataclass
-from typing import Any, Callable, Optional, Type, get_type_hints
-
-from pydantic import BaseModel, create_model, Field
+from typing import Callable, Optional
 
 from driven.core.harness import Emitter, HarnessState, Llm
-from driven.core.schemas import (
-    JSONValue,
-    LlmToolFunction,
-    ToolCall,
-    ToolResult,
-)
-
-
-RUNTIME_PARAMS = {"state", "llm", "emitter", "spawn_branch"}
-
-
-class Tool(BaseModel):
-    func: Callable
-    name: str
-    description: str
-    args_schema: Type[BaseModel]
-    is_input_pydantic: bool
-    is_async: bool
-
-    runtime_params: set[str] = Field(default_factory=set)
-
-    async def run(self, args: dict[str, Any], runtime_context: dict = {}) -> JSONValue:
-        validated_args = self.args_schema.model_validate(args)
-        kwargs = validated_args.model_dump()
-
-        for param_name in self.runtime_params:
-            kwargs[param_name] = runtime_context.get(param_name)
-
-        match (self.is_async, self.is_input_pydantic):
-            case True, True:
-                return await self.func(validated_args)
-            case True, False:
-                return await self.func(**kwargs)
-            case False, True:
-                return self.func(validated_args)
-            case False, False:
-                return self.func(**kwargs)
-
-    def get_schema(self, full_name: str) -> LlmToolFunction:
-        return LlmToolFunction(
-            name=full_name,
-            description=self.description,
-            parameters_schema=(self.args_schema.model_json_schema()),
-        )
-
-
-@dataclass(slots=True)
-class RegisteredTool:
-    extension_name: str
-    tool: Tool
-
-
-def build_tool(func: Callable, metadata: dict[str, Any]) -> Tool:
-    sig = inspect.signature(func)
-    type_hints = get_type_hints(func)
-    is_async = inspect.iscoroutinefunction(func)
-    runtime_params: set[str] = set()
-    fields: dict[str, Any] = {}
-    params = [
-        param for param in sig.parameters.values() if param.name not in ("self", "cls")
-    ]
-
-    for param in params:
-        if param.name in RUNTIME_PARAMS:
-            runtime_params.add(param.name)
-            continue
-
-        param_type = type_hints.get(param.name, Any)
-        if param.default == inspect.Parameter.empty:
-            fields[param.name] = (param_type, ...)
-        else:
-            fields[param.name] = (param_type, param.default)
-
-    if len(fields) == 0:
-        args_schema = create_model(f"{metadata['name']}InputSchema")
-        return Tool(
-            func=func,
-            name=metadata["name"],
-            description=metadata["description"],
-            args_schema=args_schema,
-            is_input_pydantic=False,
-            is_async=is_async,
-            runtime_params=runtime_params,
-        )
-
-    if len(fields) == 1:
-        first_param_type = list(fields.values())[0][0]
-        if inspect.isclass(first_param_type) and issubclass(
-            first_param_type, BaseModel
-        ):
-            return Tool(
-                func=func,
-                name=metadata["name"],
-                description=metadata["description"],
-                args_schema=(first_param_type),
-                is_input_pydantic=True,
-                is_async=is_async,
-                runtime_params=runtime_params,
-            )
-
-    args_schema = create_model(f"{metadata['name']}InputSchema", **fields)
-    return Tool(
-        func=func,
-        name=metadata["name"],
-        description=metadata["description"],
-        args_schema=args_schema,
-        is_input_pydantic=False,
-        is_async=is_async,
-        runtime_params=runtime_params,
-    )
-
-
-def tool(name: Optional[str] = None, description: Optional[str] = None):
-    def decorator(func):
-        setattr(
-            func,
-            "__tool_metadata__",
-            {
-                "name": (name or func.__name__),
-                "description": (
-                    description or func.__doc__ or "No description provided."
-                ),
-            },
-        )
-        return func
-
-    return decorator
+from driven.core.schemas import LlmToolFunction, Message, ToolCall, ToolResult
+from driven.core.tool import RegisteredTool, Tool, discover_tools
 
 
 class Extension:
@@ -144,18 +15,7 @@ class Extension:
     requires: list[str] = []
 
     def __init__(self):
-        self.tools: dict[str, Tool] = {}
-        self._discover_tools()
-
-    def _discover_tools(self):
-        for _, method in inspect.getmembers(self, predicate=inspect.ismethod):
-            metadata = getattr(method, "__tool_metadata__", None)
-
-            if metadata is None:
-                continue
-
-            tool_obj = build_tool(func=method, metadata=metadata)
-            self.tools[tool_obj.name] = tool_obj
+        self.tools: dict[str, Tool] = {t.name: t for t, _ in discover_tools(self)}
 
     async def start(self):
         pass
@@ -163,17 +23,98 @@ class Extension:
     async def stop(self):
         pass
 
+    async def branch(
+        self,
+        spawn_branch: Callable,
+        parent_state: HarnessState,
+        prompt: str | list[Message],
+        label: str = "",
+        system: str = "",
+        middlewares: list = [],
+        session_middlewares: list = [],
+    ) -> tuple:
+        return await spawn_branch(
+            parent_state=parent_state,
+            prompt=prompt,
+            label=label or self.name,
+            system=system,
+            middlewares=middlewares,
+            session_middlewares=session_middlewares,
+        )
+
+
+class SubAgent(Extension):
+    private_extensions: list = []
+
+    def __init__(self):
+        self._public_tools: dict[str, Tool] = {}
+        self._private_tools: dict[str, tuple[Tool, str]] = {}
+        self._private_ext_instances: list[Extension] = []
+        self._init_tools()
+        self.tools = dict(self._public_tools)
+
+    def _init_tools(self):
+        for tool_obj, is_public in discover_tools(self):
+            if is_public:
+                self._public_tools[tool_obj.name] = tool_obj
+            else:
+                self._private_tools[tool_obj.name] = (tool_obj, self.name)
+
+    async def start(self):
+        for ext in self._resolve_private_extensions():
+            self._private_ext_instances.append(ext)
+            await ext.start()
+            for tool_obj in ext.tools.values():
+                self._private_tools[tool_obj.name] = (tool_obj, ext.name)
+
+    async def stop(self):
+        for ext in self._private_ext_instances:
+            try:
+                await ext.stop()
+            except Exception:
+                pass
+
+    def _resolve_private_extensions(self) -> list[Extension]:
+        result: list[Extension] = []
+        for ext in self.private_extensions:
+            if isinstance(ext, Extension):
+                result.append(ext)
+            else:
+                result.append(ext())
+        return result
+
+    async def branch(
+        self,
+        spawn_branch: Callable,
+        parent_state: HarnessState,
+        prompt: str | list[Message],
+        label: str = "",
+        system: str = "",
+        middlewares: list = [],
+        session_middlewares: list = [],
+    ) -> tuple:
+        return await spawn_branch(
+            parent_state=parent_state,
+            prompt=prompt,
+            label=label or self.name,
+            system=system,
+            middlewares=middlewares,
+            session_middlewares=session_middlewares,
+            private_of=self.name,
+        )
+
 
 class ExtensionRegistry:
     def __init__(
         self,
-        exts: list[Extension] = [],
+        exts: list[Extension] | None = None,
         max_start_attempts: int = 3,
         retry_delay: float = 2.0,
     ):
-        self.exts = exts
+        self.exts = exts or []
         self.extensions: dict[str, Extension] = {}
         self.tools: dict[str, RegisteredTool] = {}
+        self._private: dict[str, dict[str, RegisteredTool]] = {}
         self.max_start_attempts = max_start_attempts
         self.retry_delay = retry_delay
         self._tg: asyncio.TaskGroup | None = None
@@ -181,101 +122,90 @@ class ExtensionRegistry:
     async def __aenter__(self):
         self._tg = asyncio.TaskGroup()
         await self._tg.__aenter__()
-
         for ext in self.exts:
             await self.register(ext)
-
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        for extension in self.extensions.values():
+        for ext in self.extensions.values():
             try:
-                await extension.stop()
+                await ext.stop()
             except Exception:
                 pass
         assert self._tg
-
         await self._tg.__aexit__(exc_type, exc, tb)
-
-    async def _start_extension(self, extension: Extension):
-        last_exception: Exception | None = None
-
-        for attempt in range(1, self.max_start_attempts + 1):
-            try:
-                await extension.start()
-                return
-
-            except asyncio.CancelledError:
-                raise
-
-            except Exception as e:
-                last_exception = e
-                print(
-                    f"[registry] failed to start "
-                    f"extension='{extension.name}' "
-                    f"attempt={attempt}/"
-                    f"{self.max_start_attempts} "
-                    f"error={e}"
-                )
-
-                try:
-                    await extension.stop()
-                except Exception:
-                    pass
-
-                if attempt < self.max_start_attempts:
-                    await asyncio.sleep(self.retry_delay)
-
-        raise RuntimeError(
-            f"Failed to start extension "
-            f"'{extension.name}' "
-            f"after "
-            f"{self.max_start_attempts} "
-            f"attempts"
-        ) from last_exception
 
     async def register(self, extension: Extension):
         if extension.name in self.extensions:
             raise RuntimeError(f"Extension '{extension.name}' already registered")
 
-        await self._start_extension(extension)
+        await self._start(extension)
         self.extensions[extension.name] = extension
+        self._register_tools(extension)
 
+    def _register_tools(self, extension: Extension):
         for local_name, tool_obj in extension.tools.items():
             full_name = f"{extension.name}-{local_name}"
+            self.tools[full_name] = RegisteredTool(extension.name, tool_obj)
 
-            if full_name in self.tools:
-                raise RuntimeError(f"Duplicate tool '{full_name}'")
+        if isinstance(extension, SubAgent):
+            self._private[extension.name] = {}
+            for local_name, (tool_obj, source_ext) in extension._private_tools.items():
+                full_name = f"{source_ext}-{local_name}"
+                self._private[extension.name][full_name] = RegisteredTool(
+                    source_ext, tool_obj
+                )
 
-            self.tools[full_name] = RegisteredTool(
-                extension_name=(extension.name), tool=tool_obj
-            )
+    async def _start(self, extension: Extension):
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_start_attempts + 1):
+            try:
+                await extension.start()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                last_error = e
+                try:
+                    await extension.stop()
+                except Exception:
+                    pass
+                if attempt < self.max_start_attempts:
+                    await asyncio.sleep(self.retry_delay)
 
-    def get_tools(
-        self, extension_name: (Optional[str]) = None
-    ) -> list[LlmToolFunction]:
-        tools: list[LlmToolFunction] = []
-        for full_name, registered in self.tools.items():
-            if extension_name and registered.extension_name != extension_name:
-                continue
-            tools.append(registered.tool.get_schema(full_name=full_name))
-        return tools
+        raise RuntimeError(
+            f"Failed to start extension '{extension.name}' "
+            f"after {self.max_start_attempts} attempts"
+        ) from last_error
+
+    def get_tools(self, private_of: Optional[str] = None) -> list[LlmToolFunction]:
+        if private_of:
+            pool = self._private.get(private_of, {})
+            return [rt.tool.get_schema(fn) for fn, rt in pool.items()]
+        return [rt.tool.get_schema(fn) for fn, rt in self.tools.items()]
+
+    def _find(self, name: str) -> RegisteredTool | None:
+        if name in self.tools:
+            return self.tools[name]
+        for pool in self._private.values():
+            if name in pool:
+                return pool[name]
+        return None
 
     async def call_tools(
         self,
         tools: list[ToolCall],
         state: Optional[HarnessState],
         llm: Optional[Llm],
-        emitter: (Optional[Emitter]) = None,
+        emitter: Optional[Emitter] = None,
         timeout: Optional[float] = None,
         spawn_branch: Optional[Callable] = None,
     ) -> list[ToolResult]:
         async def _run_one(call: ToolCall) -> ToolResult:
             try:
-                registered = self.tools.get(call.name)
+                registered = self._find(call.name)
                 if registered is None:
                     raise RuntimeError(f"Unknown tool '{call.name}'")
-
                 result = await registered.tool.run(
                     call.arguments,
                     runtime_context={
@@ -286,10 +216,7 @@ class ExtensionRegistry:
                     },
                 )
                 return ToolResult(
-                    name=call.name,
-                    ok=True,
-                    content=result,
-                    call_id=call.call_id,
+                    name=call.name, ok=True, content=result, call_id=call.call_id
                 )
             except Exception as e:
                 return ToolResult(
@@ -302,15 +229,15 @@ class ExtensionRegistry:
 
         try:
             async with asyncio.timeout(timeout):
-                return await asyncio.gather(*[_run_one(call) for call in tools])
+                return await asyncio.gather(*[_run_one(c) for c in tools])
         except TimeoutError:
             return [
                 ToolResult(
-                    name=call.name,
+                    name=c.name,
                     ok=False,
-                    call_id=call.call_id,
+                    call_id=c.call_id,
                     error_type="TimeoutError",
                     error_message="tool batch timed out",
                 )
-                for call in tools
+                for c in tools
             ]
