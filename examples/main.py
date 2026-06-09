@@ -8,8 +8,6 @@ from driven.agent import Agent, InMemoryStateManager, ToolCallingController
 from driven.core.harness import Emitter
 from driven.core.harness_middlewares import (
     compaction_step_middleware,
-    lifecycle_session_middleware,
-    lifecycle_step_middleware,
     max_steps_middleware,
 )
 from driven.core.tool_runtime import ExtensionRegistry
@@ -61,7 +59,7 @@ def _print_result(state, label="RESULT"):
         print()
 
 
-async def run_minimal_coder(api_key: str):
+async def run_number_guess(api_key: str):
     async with Agent(
         llm=OpenAILlm(model="gpt-4.1-mini", api_key=api_key),
         runtime=ExtensionRegistry(exts=[NumberGuessExtension()]),
@@ -69,14 +67,12 @@ async def run_minimal_coder(api_key: str):
         state_manager=InMemoryStateManager(),
         middlewares=[
             max_steps_middleware(20),
-            lifecycle_step_middleware(),
             compaction_step_middleware(),
         ],
-        session_middlewares=[lifecycle_session_middleware(run_id="run-guess")],
         emitter=PrintEmitter(),
     ) as agent:
         state, error = await agent.run(
-            prompt="Play the number guessing game. Start a new game and try to guess the number using hints.",
+            prompt="Play the number guessing game. Start a new game and find the number.",
             run_id="run-guess",
         )
 
@@ -100,10 +96,7 @@ async def run_coding_agent(api_key: str):
         emitter=PrintEmitter(),
     ) as agent:
         state, error = await agent.run(
-            prompt=(
-                "Use the coding agent to play the number guessing game. "
-                "Start a new game and find the number."
-            ),
+            prompt="Create a fibonacci.py that computes the 10th fibonacci number, then run it.",
             run_id="run-coding-agent",
         )
 
@@ -115,7 +108,7 @@ async def run_coding_agent(api_key: str):
 
 
 EXAMPLES = {
-    "minimal-coder": run_minimal_coder,
+    "number-guess": run_number_guess,
     "coding-agent": run_coding_agent,
 }
 

@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from driven.core.harness import HarnessState, SpawnBranch
 from driven.core.tool import tool
 from driven.core.tool_runtime import SubAgent
-from guess import NumberGuessExtension
+from coder import CoderExtension
 
 
 class CodeTaskInput(BaseModel):
@@ -15,7 +15,7 @@ class CodeTaskInput(BaseModel):
 class CodingAgent(SubAgent):
     name = "coding-agent"
     description = "Spawns a coding agent as a branch to perform tasks."
-    private_extensions = [NumberGuessExtension()]
+    private_extensions = [CoderExtension(workspace="./workspace")]
 
     @tool(description="Run a coding task", public=True)
     async def run(
