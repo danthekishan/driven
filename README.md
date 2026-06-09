@@ -1,101 +1,122 @@
 # driven
 
-A protocol-driven agent orchestration framework for building LLM-powered tool-using agents.
+a protocol-driven agent orchestration framework for building LLM-powered tool-using agents.
 
 ## what it is
 
-driven is not an agent. it is the infrastructure for building one.
+driven is a framework — not an agent, not a runtime, not a set of tools.
 
-it provides a small set of protocols, schemas, and a composable execution model that lets you wire together 
-LLMs, tools, state management, and control strategies — without the framework making assumptions about 
-what you're building.
+it provides the orchestration layer: protocols, schemas, a composable execution model, and a wiring mechanism. you bring the LLM, the tools, the state strategy, and the control logic. driven runs them.
 
-## core idea
+## what driven provides
 
-**protocols define contracts. implementations fill them. the framework orchestrates.**
+| component | what it is |
+|---|---|
+| `Agent` | wiring layer — composes harness, runtime, controller, state, middlewares |
+| `Harness` | execution loop — runs turns, applies middlewares, manages lifecycle |
+| `Controller` (protocol) | decides what happens next in a turn |
+| `Runtime` (protocol) | discovers and executes tools |
+| `StateManager` (protocol) | persists and recovers state |
+| `Llm` (protocol) | talks to a language model |
+| `Emitter` (protocol) | observes events |
+| `TraceSink` (protocol) | records execution traces |
+| `Extension` / `@tool` | base class and decorator for building tool groups |
+| `ExtensionRegistry` | manages extension lifecycle, registration, and parallel execution |
+| middlewares | intercept hooks for compaction, limits, retries, logging, etc. |
 
-every major component in driven is defined as a protocol:
+## what you provide
 
-- **`Llm`** — how to talk to a language model
-- **`Controller`** — how to decide what happens next in a turn
-- **`Runtime`** — how to discover and execute tools
-- **`StateManager`** — how to persist and recover state
-- **`Emitter`** — how to observe what's happening
-- **`TraceSink`** — how to record execution traces
+driven ships no tools, no extensions, no LLM clients. those belong to your application.
 
-the framework doesn't care how you implement these. it only cares that they satisfy the contract.
+the framework gives you the `Extension` base class and `@tool` decorator to define your own:
+
+```python
+from driven.core.tool_runtime import Extension, tool
+from pydantic import BaseModel
+
+class SearchInput(BaseModel):
+    query: str
+
+class SearchExtension(Extension):
+    name = "search"
+    description = "Search tools."
+
+    @tool(description="Search the web.")
+    async def search_web(self, input: SearchInput) -> str:
+        ...  # your logic
+```
+
+you wire everything together with `Agent`:
+
+```python
+from driven.agent import Agent, ToolCallingController, InMemoryStateManager
+from driven.core.harness_middlewares import max_steps_middleware, compaction_step_middleware
+from driven.core.tool_runtime import ExtensionRegistry
+
+async with Agent(
+    llm=MyLlm(...),
+    runtime=ExtensionRegistry(exts=[SearchExtension()]),
+    controller=ToolCallingController(),
+    state_manager=InMemoryStateManager(),
+    middlewares=[max_steps_middleware(25), compaction_step_middleware()],
+) as agent:
+    state, error = await agent.run(prompt="Search for ...")
+```
+
+everything explicit. nothing hidden. you see every component that's wired in.
 
 ## architecture
 
 ```
                     ┌─────────────┐
-                    │    Agent    │  wiring layer — composes everything
+                    │    Agent     │  wiring — you compose this
                     └──────┬──────┘
                            │
                     ┌──────┴──────┐
-                    │   Harness   │  execution loop — runs turns via controller
+                    │   Harness    │  execution loop — driven owns this
                     └──────┬──────┘
                            │
               ┌────────────┼────────────┐
               │            │            │
-        ┌─────┴─────┐ ┌────┴───┐ ┌──────┴────┐
-        │ Controller│ │  Llm   │ │  Runtime  │
-        └───────────┘ └────────┘ └─────┬─────┘
-                                       │
-                              ┌────────┴──────────┐
-                              │ ExtensionRegistry │
-                              └────────┬──────────┘
+        ┌─────┴─────┐ ┌───┴───┐ ┌─────┴─────┐
+        │ Controller │ │  Llm  │ │  Runtime  │
+        └───────────┘ └───────┘ └─────┬─────┘
                                        │
                               ┌────────┴────────┐
-                              │   Extensions    │  logical groups of tools
+                              │ ExtensionRegistry │
+                              └────────┬────────┘
+                                       │
+                              ┌────────┴────────┐
+                              │   Extensions     │  you own these
                               └─────────────────┘
 ```
 
 ### harness
 
-the harness is the execution engine. it runs a loop: ask the controller for a turn, process events, update state, 
-repeat until done.
+the execution engine. it runs a loop: ask the controller for a turn, process events, update state, repeat until done.
 
-middleware chains wrap the loop — step-level and session-level — giving you hooks for compaction, limits, logging, 
-retries, or anything else without touching core logic.
+middleware chains wrap the loop — step-level and session-level — giving you hooks for compaction, limits, logging, retries, or anything else without touching core logic.
 
 ### controller
 
-the controller decides what happens each turn. it streams `TurnEvent`s 
-— request prepared, output received, tools requested, tools completed, assistant finalized, turn finished.
+decides what happens each turn. streams `TurnEvent`s — request prepared, output received, tools requested, tools completed, assistant finalized, turn finished.
 
 `ToolCallingController` is the provided implementation: a standard LLM → tool call → tool result → repeat loop.
 
-but the protocol allows anything — reAct loops, planners, multi-agent delegation, reflective retries.
+the protocol allows anything — reAct loops, planners, multi-agent delegation, reflective retries.
 
-### runtime (tool runtime)
+### runtime
 
-the runtime is the boundary between the harness and the outside world. it discovers available tools and executes them.
+the boundary between the harness and the outside world. discovers available tools and executes them.
 
 `ExtensionRegistry` is the provided implementation:
 
-- **extensions** are logical groups of tools — each with a name, lifecycle (`start`/`stop`), and auto-discovered `@tool`-decorated methods
+- **extensions** are scoped, named groups of tools — each with a lifecycle (`start`/`stop`) and auto-discovered `@tool`-decorated methods
 - the registry manages extension lifecycle, tool registration, and parallel execution
 - tools can receive runtime context (`state`, `llm`, `emitter`) via parameter injection — no coupling
-
-this separation is intentional:
-
-- **harness logic** belongs to driven — reliability, extendability, correctness
-- **tool/runtime logic** belongs to the user — what tools exist, how they work, what resources they need
+- can be extended to share resources (clients, connection pools) across extensions
 
 a runtime can be local (extensions in-process), remote, or anything else. the harness doesn't know or care.
-
-### extensions
-
-an extension is a scoped, named group of tools. think of it as a plugin:
-
-```
-coder          → read_file, write_file, run_command, ...
-github         → create_pr, list_issues, ...
-database       → query, insert, ...
-```
-
-each extension owns its scope. the registry can be extended to share common resources (clients, connection pools) across extensions — avoiding duplicate connections and boilerplate.
 
 ### state manager
 
@@ -118,11 +139,15 @@ they compose. they're explicit. there are no hidden defaults.
 - **decoupling over integration** — harness doesn't know about tools; runtime doesn't know about orchestration
 - **minimal until proven otherwise** — add complexity when real needs emerge, not in anticipation
 
+## examples
+
+- [`examples/minimal_coder/`](examples/minimal_coder/) — minimal agent using the coder extension with OpenAI
+
 ## status
 
-this is early exploration. the architecture is solid, the abstractions are validated, but the surface is still forming.
+early exploration. the architecture is solid, the abstractions are validated, but the surface is still forming.
 
-the current focus:
+current focus:
 
 - building real agents to validate the abstractions
 - discovering practical limitations
