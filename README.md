@@ -10,25 +10,21 @@ it provides the orchestration layer: protocols, schemas, a composable execution 
 
 ## what driven provides
 
-| component | what it is |
-|---|---|
-| `Agent` | wiring layer — composes harness, runtime, controller, state, middlewares |
-| `Harness` | execution loop — runs turns, applies middlewares, manages lifecycle |
-| `Controller` (protocol) | decides what happens next in a turn |
-| `Runtime` (protocol) | discovers and executes tools |
-| `StateManager` (protocol) | persists and recovers state |
-| `Llm` (protocol) | talks to a language model |
-| `Emitter` (protocol) | observes events |
-| `Extension` / `@tool()` | base class and decorator for building tool groups |
-| `SubAgent` | extension that spawns branches with private tools |
-| `ExtensionRegistry` | manages extension lifecycle, registration, and parallel execution |
-| middlewares | intercept hooks for compaction, limits, retries, logging, etc. |
+| component                 | what it is                                                               |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `Agent`                   | wiring layer — composes harness, runtime, controller, state, middlewares |
+| `Harness`                 | execution loop — runs turns, applies middlewares, manages lifecycle      |
+| `Controller` (protocol)   | decides what happens next in a turn                                      |
+| `Runtime` (protocol)      | discovers and executes tools                                             |
+| `StateManager` (protocol) | persists and recovers state                                              |
+| `Llm` (protocol)          | talks to a language model                                                |
+| `Emitter` (protocol)      | observes events                                                          |
+| `Extension` / `@tool()`   | base class and decorator for building tool groups                        |
+| `SubAgent`                | extension that spawns branches with private tools                        |
+| `ExtensionRegistry`       | manages extension lifecycle, registration, and parallel execution        |
+| middlewares               | intercept hooks for compaction, limits, retries, logging, etc.           |
 
-## what you provide
-
-driven ships no tools, no extensions, no LLM clients. those belong to your application.
-
-the framework gives you the `Extension` base class and `@tool()` decorator to define your own:
+Using `Extension` base class and `@tool()` decorator to define custom tools:
 
 ```python
 from driven.core.tool_runtime import Extension
@@ -47,7 +43,7 @@ class SearchExtension(Extension):
         ...  # your logic
 ```
 
-you wire everything together with `Agent`:
+Wire everything together with `Agent`:
 
 ```python
 from driven.agent import Agent, ToolCallingController, InMemoryStateManager
@@ -63,8 +59,6 @@ async with Agent(
 ) as agent:
     state, error = await agent.run(prompt="Search for ...")
 ```
-
-everything explicit. nothing hidden. you see every component that's wired in.
 
 ## branches and sub-agents
 
@@ -103,30 +97,30 @@ branch events carry metadata (`branch_id`, `parent_run_id`, `parent_step`, `labe
 
 ```
                     ┌─────────────┐
-                    │    Agent     │  wiring — you compose this
+                    │    Agent    │  wiring — you compose this
                     └──────┬──────┘
                            │
                     ┌──────┴──────┐
-                    │   Harness    │  execution loop — driven owns this
+                    │   Harness   │  execution loop — driven owns this
                     └──────┬──────┘
                            │
-              ┌────────────┼────────────┐
-              │            │            │
-        ┌─────┴─────┐ ┌───┴───┐ ┌─────┴─────┐
-        │ Controller │ │  Llm  │ │  Runtime  │
-        └───────────┘ └───────┘ └─────┬─────┘
+              ┌────────────┼───────────┐
+              │            │           │
+        ┌─────┴─────┐ ┌────┴───┐ ┌─────┴─────┐
+        │ Controlle │ │  Llm   │ │  Runtime  │
+        └───────────┘ └────────┘ └─────┬─────┘
                                        │
-                              ┌────────┴────────┐
+                              ┌────────┴──────────┐
                               │ ExtensionRegistry │
-                              └────────┬────────┘
+                              └────────┬──────────┘
                                        │
                               ┌────────┴────────┐
                               │   Extensions    │  you own these
                               └────────┬────────┘
                                        │
-                              ┌────────┴────────┐
+                              ┌────────┴──────────┐
                               │  SubAgent (branch)│  private tools, own state
-                              └─────────────────┘
+                              └───────────────────┘
 ```
 
 ### harness
@@ -179,26 +173,7 @@ uv run python examples/main.py --name number-guess
 uv run python examples/main.py --name coding-agent
 ```
 
-| example | what it shows |
-|---|---|
-| `number-guess` | agent plays a game using `NumberGuessExtension` tools directly |
+| example        | what it shows                                                                  |
+| -------------- | ------------------------------------------------------------------------------ |
+| `number-guess` | agent plays a game using `NumberGuessExtension` tools directly                 |
 | `coding-agent` | `CodingAgent` SubAgent — parent sees 1 tool, branch gets 7 private coder tools |
-
-## design principles
-
-- **protocol over implementation** — contracts first, fill in later
-- **explicit over implicit** — no hidden defaults, no magic wiring
-- **extendability over convenience** — the framework provides hooks, not opinions
-- **decoupling over integration** — harness doesn't know about tools; runtime doesn't know about orchestration
-- **minimal until proven otherwise** — add complexity when real needs emerge, not in anticipation
-
-## status
-
-early exploration. the architecture is solid, the abstractions are validated, but the surface is still forming.
-
-current focus:
-
-- building real agents to validate the abstractions
-- discovering practical limitations
-- refining the protocol boundaries
-- keeping it minimal until the picture is clear
