@@ -6,7 +6,9 @@ A protocol-driven agent orchestration framework for building LLM-powered tool-us
 
 driven is not an agent. it is the infrastructure for building one.
 
-it provides a small set of protocols, schemas, and a composable execution model that lets you wire together LLMs, tools, state management, and control strategies — without the framework making assumptions about what you're building.
+it provides a small set of protocols, schemas, and a composable execution model that lets you wire together 
+LLMs, tools, state management, and control strategies — without the framework making assumptions about 
+what you're building.
 
 ## core idea
 
@@ -27,37 +29,40 @@ the framework doesn't care how you implement these. it only cares that they sati
 
 ```
                     ┌─────────────┐
-                    │    Agent     │  wiring layer — composes everything
+                    │    Agent    │  wiring layer — composes everything
                     └──────┬──────┘
                            │
                     ┌──────┴──────┐
-                    │   Harness    │  execution loop — runs turns via controller
+                    │   Harness   │  execution loop — runs turns via controller
                     └──────┬──────┘
                            │
               ┌────────────┼────────────┐
               │            │            │
-        ┌─────┴─────┐ ┌───┴───┐ ┌─────┴─────┐
-        │ Controller │ │  Llm  │ │  Runtime  │
-        └───────────┘ └───────┘ └─────┬─────┘
+        ┌─────┴─────┐ ┌────┴───┐ ┌──────┴────┐
+        │ Controller│ │  Llm   │ │  Runtime  │
+        └───────────┘ └────────┘ └─────┬─────┘
                                        │
-                              ┌────────┴────────┐
+                              ┌────────┴──────────┐
                               │ ExtensionRegistry │
-                              └────────┬────────┘
+                              └────────┬──────────┘
                                        │
                               ┌────────┴────────┐
-                              │   Extensions     │  logical groups of tools
+                              │   Extensions    │  logical groups of tools
                               └─────────────────┘
 ```
 
 ### harness
 
-the harness is the execution engine. it runs a loop: ask the controller for a turn, process events, update state, repeat until done.
+the harness is the execution engine. it runs a loop: ask the controller for a turn, process events, update state, 
+repeat until done.
 
-middleware chains wrap the loop — step-level and session-level — giving you hooks for compaction, limits, logging, retries, or anything else without touching core logic.
+middleware chains wrap the loop — step-level and session-level — giving you hooks for compaction, limits, logging, 
+retries, or anything else without touching core logic.
 
 ### controller
 
-the controller decides what happens each turn. it streams `TurnEvent`s — request prepared, output received, tools requested, tools completed, assistant finalized, turn finished.
+the controller decides what happens each turn. it streams `TurnEvent`s 
+— request prepared, output received, tools requested, tools completed, assistant finalized, turn finished.
 
 `ToolCallingController` is the provided implementation: a standard LLM → tool call → tool result → repeat loop.
 
