@@ -6,7 +6,7 @@ from pydantic import BaseModel, create_model
 from driven.core.schemas import JSONValue, LlmToolFunction
 
 
-RUNTIME_PARAMS = {"state", "llm", "emitter", "spawn_branch"}
+RUNTIME_PARAMS = {"state", "llm", "emitter"}
 
 
 class ToolDescriptor:

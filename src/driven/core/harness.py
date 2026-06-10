@@ -50,11 +50,6 @@ class HarnessState:
     branches: list[BranchInfo] = field(default_factory=list)
 
 
-SpawnBranch = Callable[
-    ...,
-    Awaitable[tuple[Optional[HarnessState], Optional[Exception]]],
-]
-
 CallTools = Callable[[list[ToolCall], Optional[float]], Awaitable[list[ToolResult]]]
 
 
@@ -545,21 +540,32 @@ def spawn_branch_harness_runner(
 class Harness:
     def __init__(
         self,
-        ctx: HarnessContext,
+        llm: Llm,
+        runtime: Runtime,
+        controller: Controller,
+        state_manager: StateManager,
         step_middlewares: Middlewares,
         session_middlewares: Middlewares,
+        emitter: Optional[Emitter] = None,
     ):
-        self.ctx = ctx
-        self.harness_runner = spawn_harness_runner(
-            ctx, step_middlewares, session_middlewares
+        self.ctx = HarnessContext(
+            state_manager=state_manager,
+            controller=controller,
+            runtime=runtime,
+            llm=llm,
+            emitter=emitter,
         )
 
-    async def __aenter__(self):
+        self.harness_runner = spawn_harness_runner(
+            self.ctx, step_middlewares, session_middlewares
+        )
+
+    async def connect(self):
         await self.ctx.runtime.connect()
         self.ctx._connected = True
         return self
 
-    async def __aexit__(self, *args, **kwargs):
+    async def disconnect(self, *args, **kwargs):
         self.ctx._connected = False
         await self.ctx.runtime.disconnect()
 
@@ -569,22 +575,3 @@ class Harness:
         self.ctx._require_connected()
         _state_id = state_id or str(uuid4())
         return await self.harness_runner(system, prompt, _state_id)
-
-    @staticmethod
-    def create_branch_runner(
-        ctx: HarnessContext,
-        label: str,
-        parent_state: HarnessState,
-        step_middlewares: Optional[Middlewares] = None,
-        session_middlewares: Optional[Middlewares] = None,
-        private_of: Optional[str] = None,
-    ):
-        ctx._require_connected()
-        return spawn_branch_harness_runner(
-            label,
-            parent_state,
-            ctx,
-            step_middlewares or [],
-            session_middlewares or [],
-            private_of,
-        )
