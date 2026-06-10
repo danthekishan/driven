@@ -1,13 +1,8 @@
 import asyncio
 from typing import Callable, Optional
 
-from driven.core.harness import (
-    Emitter,
-    HarnessContext,
-    HarnessState,
-    Llm,
-    spawn_branch_harness_runner,
-)
+from driven.core.protocols import Emitter, HarnessContext, HarnessState, Llm
+
 from driven.core.schemas import LlmToolFunction, Message, ToolCall, ToolResult
 from driven.core.tool import RegisteredTool, Tool, discover_tools
 
@@ -23,6 +18,9 @@ class Extension:
     def __init__(self):
         self.tools: dict[str, Tool] = {t.name: t for t, _ in discover_tools(self)}
         self._create_branch: Optional[Callable] = None
+
+    def set_create_branch(self, create_branch: Callable):
+        self._create_branch = create_branch
 
     async def start(self):
         pass
@@ -40,9 +38,7 @@ class Extension:
         session_middlewares: list | None = None,
     ) -> tuple:
         if self._create_branch is None:
-            raise RuntimeError(
-                "branch not available — harness not connected"
-            )
+            raise RuntimeError("branch not available — harness not connected")
         return await self._create_branch(
             parent_state=parent_state,
             prompt=prompt,
@@ -103,9 +99,7 @@ class SubAgent(Extension):
         session_middlewares: list | None = None,
     ) -> tuple:
         if self._create_branch is None:
-            raise RuntimeError(
-                "branch not available — harness not connected"
-            )
+            raise RuntimeError("branch not available — harness not connected")
         return await self._create_branch(
             parent_state=parent_state,
             prompt=prompt,
@@ -117,7 +111,7 @@ class SubAgent(Extension):
         )
 
 
-class ExtensionRegistry:
+class ToolRuntime:
     def __init__(
         self,
         exts: list[Extension] | None = None,
@@ -136,55 +130,30 @@ class ExtensionRegistry:
     def set_ctx(self, ctx: HarnessContext):
         self._ctx = ctx
 
-    async def __aenter__(self):
+    async def connect(self, create_branch: Callable):
         self._tg = asyncio.TaskGroup()
         await self._tg.__aenter__()
         for ext in self.exts:
-            await self.register(ext)
+            await self.register(ext, create_branch)
         return self
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def disconnect(self, *args, **kwargs):
         for ext in self.extensions.values():
             try:
                 await ext.stop()
             except Exception:
                 pass
         assert self._tg
-        await self._tg.__aexit__(exc_type, exc, tb)
+        await self._tg.__aexit__(*args, **kwargs)
 
-    async def register(self, extension: Extension):
+    async def register(self, extension: Extension, create_branch: Callable):
         if extension.name in self.extensions:
             raise RuntimeError(f"Extension '{extension.name}' already registered")
 
         await self._start(extension)
-        extension._create_branch = self._make_create_branch(extension)
+        extension.set_create_branch(create_branch)
         self.extensions[extension.name] = extension
         self._register_tools(extension)
-
-    def _make_create_branch(self, extension: Extension) -> Callable:
-        def _create_branch(
-            parent_state: HarnessState,
-            prompt: str | list[Message],
-            label: str = "",
-            system: str = "",
-            middlewares: list | None = None,
-            session_middlewares: list | None = None,
-            private_of: Optional[str] = None,
-        ):
-            if self._ctx is None:
-                raise RuntimeError("registry has no context — harness not connected")
-            self._ctx._require_connected()
-            runner = spawn_branch_harness_runner(
-                label=label,
-                parent_state=parent_state,
-                ctx=self._ctx,
-                middlewares=middlewares or [],
-                session_middlewares=session_middlewares or [],
-                private_of=private_of,
-            )
-            return runner(system=system, prompt=prompt)
-
-        return _create_branch
 
     def _register_tools(self, extension: Extension):
         for local_name, tool_obj in extension.tools.items():

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 import time
-from typing import Any, Literal, Optional, TypeAlias, Union
+from typing import Any, Awaitable, Callable, Literal, Optional, TypeAlias, Union
 
 
 # ---------- Shared primitive types ----------
@@ -298,3 +298,5 @@ TurnEvent = Union[
     AssistantFinalized,
     TurnFinished,
 ]
+
+CallTools = Callable[[list[ToolCall], Optional[float]], Awaitable[list[ToolResult]]]

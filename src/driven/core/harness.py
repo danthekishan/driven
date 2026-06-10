@@ -1,14 +1,12 @@
 from functools import wraps
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 import time
 from typing import (
     Any,
-    AsyncIterator,
     Awaitable,
     Callable,
     Optional,
     Protocol,
-    runtime_checkable,
 )
 from uuid import uuid4
 
@@ -16,150 +14,24 @@ from driven.core.schemas import (
     AssistantFinalized,
     BranchInfo,
     ControllerRequested,
-    EventLogEntry,
-    LlmInput,
-    LlmOutput,
     LlmOutputReceived,
     LlmRequestPrepared,
-    LlmStructuredResponse,
-    LlmTextDelta,
-    LlmTextResponse,
-    LlmToolFunction,
     Message,
-    ToolCall,
-    ToolResult,
     ToolsCompleted,
     ToolsRequested,
     TraceRecord,
     TurnEvent,
     TurnFinished,
 )
-
-
-@dataclass
-class HarnessState:
-    state_id: str
-    system: str = ""
-    prompt: str = ""
-    step: int = field(default=0)
-    messages: list[Message] = field(default_factory=list)
-    event_log: list[EventLogEntry] = field(default_factory=list)
-    done: bool = False
-    internal: dict[str, Any] = field(default_factory=dict)
-    branch: Optional[BranchInfo] = None
-    branches: list[BranchInfo] = field(default_factory=list)
-
-
-CallTools = Callable[[list[ToolCall], Optional[float]], Awaitable[list[ToolResult]]]
-
-
-@runtime_checkable
-class Emitter(Protocol):
-    async def __call__(self, event: dict[str, Any]) -> None: ...
-
-
-@runtime_checkable
-class Llm(Protocol):
-    async def generate_text(self, request: LlmInput) -> LlmTextResponse: ...
-    async def generate_structured(
-        self, request: LlmInput, schema: dict
-    ) -> LlmStructuredResponse: ...
-    async def chat_with_tools(
-        self, request: LlmInput, tools: list[LlmToolFunction]
-    ) -> LlmOutput: ...
-    async def generate_text_stream(
-        self, request: LlmInput
-    ) -> AsyncIterator[LlmTextDelta]: ...
-
-
-@runtime_checkable
-class Runtime(Protocol):
-    async def connect(self) -> Any: ...
-    async def disconnect(self): ...
-    def get_tools(self, *args, **kwargs) -> list[LlmToolFunction]: ...
-    async def call_tools(
-        self,
-        tools: list[ToolCall],
-        state: HarnessState,
-        llm: Llm,
-        emitter: Optional[Emitter] = None,
-        timeout: Optional[float] = None,
-    ) -> list[ToolResult]: ...
-
-
-@runtime_checkable
-class Controller(Protocol):
-    def __call__(
-        self,
-        messages: list[Message],
-        system: str,
-        get_tools: Callable[..., list[LlmToolFunction]],
-        call_tools: CallTools,
-        llm: Llm,
-    ) -> AsyncIterator[TurnEvent]: ...
-
-
-@runtime_checkable
-class StateManager(Protocol):
-    async def load(self, run_id: str) -> HarnessState: ...
-    async def save(self, state: HarnessState) -> HarnessState: ...
-
-
-@runtime_checkable
-class TraceSink(Protocol):
-    async def __call__(self, trace: TraceRecord) -> None: ...
-
-
-@dataclass
-class HarnessContext:
-    state_manager: StateManager
-    controller: Controller
-    runtime: Runtime
-    llm: Llm
-    emitter: Optional[Emitter] = None
-    trace_sink: Optional[TraceSink] = None
-    private_of: Optional[str] = None
-    _connected: bool = field(default=False, init=False)
-
-    def _require_connected(self):
-        if not self._connected:
-            raise RuntimeError(
-                "runtime not connected — enter harness as context manager first"
-            )
-
-    async def call_tools(
-        self,
-        state: HarnessState,
-        tool_calls: list[ToolCall],
-        timeout: Optional[float] = None,
-    ) -> list[ToolResult]:
-        return await self.runtime.call_tools(
-            tools=tool_calls,
-            state=state,
-            llm=self.llm,
-            emitter=self.emitter,
-            timeout=timeout,
-        )
-
-    def get_tools(
-        self,
-    ) -> list[LlmToolFunction]:
-        return self.runtime.get_tools(private_of=self.private_of)
-
-    async def run_controller(self, state: HarnessState):
-        async def _call_tools(
-            tool_calls: list[ToolCall], timeout: Optional[float] = None
-        ):
-            return await self.call_tools(state, tool_calls, timeout)
-
-        async for event in self.controller(
-            messages=state.messages,
-            system=state.system,
-            get_tools=self.get_tools,
-            call_tools=_call_tools,
-            llm=self.llm,
-        ):
-            yield event
+from driven.core.protocols import (
+    HarnessState,
+    Emitter,
+    Llm,
+    Controller,
+    StateManager,
+    HarnessContext,
+)
+from driven.core.tool_runtime import Extension, ToolRuntime
 
 
 type Next = Callable[[HarnessState, HarnessContext], Awaitable[HarnessState]]
@@ -541,13 +413,22 @@ class Harness:
     def __init__(
         self,
         llm: Llm,
-        runtime: Runtime,
+        extensions: list[Extension],
         controller: Controller,
         state_manager: StateManager,
         step_middlewares: Middlewares,
         session_middlewares: Middlewares,
         emitter: Optional[Emitter] = None,
+        max_start_attempts: int = 3,
+        retry_delay: float = 2.0,
     ):
+
+        runtime = ToolRuntime(
+            exts=extensions,
+            max_start_attempts=max_start_attempts,
+            retry_delay=retry_delay,
+        )
+
         self.ctx = HarnessContext(
             state_manager=state_manager,
             controller=controller,
@@ -561,7 +442,24 @@ class Harness:
         )
 
     async def connect(self):
-        await self.ctx.runtime.connect()
+        async def _create_branch(
+            label: str,
+            parent_state: HarnessState,
+            middlewares: Middlewares,
+            session_middlewares: Middlewares,
+            private_of: Optional[str],
+        ):
+            self.ctx._require_connected()
+            return spawn_branch_harness_runner(
+                label,
+                parent_state,
+                self.ctx,
+                middlewares,
+                session_middlewares,
+                private_of,
+            )
+
+        await self.ctx.runtime.connect(_create_branch)
         self.ctx._connected = True
         return self
 
