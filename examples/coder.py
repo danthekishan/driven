@@ -6,7 +6,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from driven.core.harness import Emitter
+from driven.core.protocols import Emitter
 from driven.core.tool import tool
 from driven.core.tool_runtime import Extension
 
@@ -210,7 +210,7 @@ class CoderExtension(Extension):
         emitter: Optional[Emitter] = None,
     ) -> dict:
         if emitter:
-            await emitter.emit(
+            await emitter(
                 {
                     "source": "extension.coder",
                     "name": "command_started",
@@ -253,7 +253,7 @@ class CoderExtension(Extension):
         }
 
         if emitter:
-            await emitter.emit(
+            await emitter(
                 {
                     "source": "extension.coder",
                     "name": "command_completed",

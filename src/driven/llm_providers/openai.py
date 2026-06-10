@@ -15,7 +15,7 @@ from openai.types.shared_params.function_definition import (
     FunctionDefinition,
 )
 
-from driven.core.harness import Llm
+from driven.core.protocols import Llm
 from driven.core.schemas import (
     LlmInput,
     LlmOutput,

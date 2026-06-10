@@ -12,16 +12,15 @@ it provides the orchestration layer: protocols, schemas, a composable execution 
 
 | component                 | what it is                                                               |
 | ------------------------- | ------------------------------------------------------------------------ |
-| `Agent`                   | wiring layer — composes harness, runtime, controller, state, middlewares |
-| `Harness`                 | execution loop — runs turns, applies middlewares, manages lifecycle      |
+| `Agent`                   | wiring layer — composes harness, extensions, controller, state, middlewares |
+| `Harness`                 | execution loop — runs turns, applies middlewares, manages lifecycle, owns ToolRuntime |
+| `ToolRuntime`             | manages extension lifecycle, registration, tool discovery, and execution |
 | `Controller` (protocol)   | decides what happens next in a turn                                      |
-| `Runtime` (protocol)      | discovers and executes tools                                             |
 | `StateManager` (protocol) | persists and recovers state                                              |
 | `Llm` (protocol)          | talks to a language model                                                |
 | `Emitter` (protocol)      | observes events                                                          |
 | `Extension` / `@tool()`   | base class and decorator for building tool groups                        |
 | `SubAgent`                | extension that spawns branches with private tools                        |
-| `ExtensionRegistry`       | manages extension lifecycle, registration, and parallel execution        |
 | middlewares               | intercept hooks for compaction, limits, retries, logging, etc.           |
 
 Using `Extension` base class and `@tool()` decorator to define custom tools:
@@ -48,11 +47,10 @@ Wire everything together with `Agent`:
 ```python
 from driven.agent import Agent, ToolCallingController, InMemoryStateManager
 from driven.core.harness_middlewares import max_steps_middleware, compaction_step_middleware
-from driven.core.tool_runtime import ExtensionRegistry
 
 async with Agent(
     llm=MyLlm(...),
-    runtime=ExtensionRegistry(exts=[SearchExtension()]),
+    extensions=[SearchExtension()],
     controller=ToolCallingController(),
     state_manager=InMemoryStateManager(),
     middlewares=[max_steps_middleware(25), compaction_step_middleware()],
@@ -69,7 +67,7 @@ the harness supports **branching** — spawning a separate execution run from wi
 ```python
 from driven.core.tool_runtime import SubAgent
 from driven.core.tool import tool
-from driven.core.harness import HarnessState, SpawnBranch
+from driven.core.protocols import HarnessState
 
 class CodingAgent(SubAgent):
     name = "coding-agent"
@@ -77,12 +75,11 @@ class CodingAgent(SubAgent):
     private_extensions = [CoderExtension(workspace="./workspace")]
 
     @tool(description="Run a coding task", public=True)
-    async def run(self, input: CodeTaskInput, state: HarnessState, spawn_branch: SpawnBranch) -> dict:
+    async def run(self, input: CodeTaskInput, state: HarnessState) -> dict:
         branch_state, error = await self.branch(
-            spawn_branch=spawn_branch,
-            parent_state=state,
             prompt=input.task,
             system="You are a coding agent. Perform the task using available tools.",
+            parent_state=state,
         )
         ...
 ```
@@ -90,6 +87,7 @@ class CodingAgent(SubAgent):
 - **public tools** (`@tool(public=True)`) — visible to the parent agent, appear as the sub-agent's interface
 - **private tools** (`@tool()`) — only visible inside the branch, come from `private_extensions`
 - the parent agent sees only the sub-agent's public tools — it delegates, the branch executes
+- extensions call `self.branch()` directly — no injection needed
 
 branch events carry metadata (`branch_id`, `parent_run_id`, `parent_step`, `label`) so you can trace the hierarchy.
 
@@ -106,13 +104,9 @@ branch events carry metadata (`branch_id`, `parent_run_id`, `parent_step`, `labe
                            │
               ┌────────────┼───────────┐
               │            │           │
-        ┌─────┴─────┐ ┌────┴───┐ ┌─────┴─────┐
-        │ Controlle │ │  Llm   │ │  Runtime  │
-        └───────────┘ └────────┘ └─────┬─────┘
-                                       │
-                              ┌────────┴──────────┐
-                              │ ExtensionRegistry │
-                              └────────┬──────────┘
+        ┌─────┴─────┐ ┌────┴───┐ ┌─────┴──────┐
+        │ Controller │ │  Llm  │ │ ToolRuntime │
+        └───────────┘ └────────┘ └─────┬──────┘
                                        │
                               ┌────────┴────────┐
                               │   Extensions    │  you own these
@@ -129,6 +123,17 @@ the execution engine. it runs a loop: ask the controller for a turn, process eve
 
 middleware chains wrap the loop — step-level and session-level — giving you hooks for compaction, limits, logging, retries, or anything else without touching core logic.
 
+### tool runtime
+
+the boundary between the harness and the outside world. discovers available tools and executes them.
+
+`ToolRuntime` is the provided implementation:
+
+- **extensions** are scoped, named groups of tools — each with a lifecycle (`start`/`stop`) and auto-discovered `@tool()`-decorated methods
+- the runtime manages extension lifecycle, tool registration, and parallel execution
+- tools can receive runtime context (`state`, `llm`, `emitter`) via parameter injection — no coupling
+- extensions get branching capability via `self.branch()` — wired by the harness, no injection needed
+
 ### controller
 
 decides what happens each turn. streams `TurnEvent`s — request prepared, output received, tools requested, tools completed, assistant finalized, turn finished.
@@ -136,19 +141,6 @@ decides what happens each turn. streams `TurnEvent`s — request prepared, outpu
 `ToolCallingController` is the provided implementation: a standard LLM → tool call → tool result → repeat loop.
 
 the protocol allows anything — reAct loops, planners, multi-agent delegation, reflective retries.
-
-### runtime
-
-the boundary between the harness and the outside world. discovers available tools and executes them.
-
-`ExtensionRegistry` is the provided implementation:
-
-- **extensions** are scoped, named groups of tools — each with a lifecycle (`start`/`stop`) and auto-discovered `@tool()`-decorated methods
-- the registry manages extension lifecycle, tool registration, and parallel execution
-- tools can receive runtime context (`state`, `llm`, `emitter`, `spawn_branch`) via parameter injection — no coupling
-- can be extended to share resources (clients, connection pools) across extensions
-
-a runtime can be local (extensions in-process), remote, or anything else. the harness doesn't know or care.
 
 ### state manager
 
@@ -177,3 +169,22 @@ uv run python examples/main.py --name coding-agent
 | -------------- | ------------------------------------------------------------------------------ |
 | `number-guess` | agent plays a game using `NumberGuessExtension` tools directly                 |
 | `coding-agent` | `CodingAgent` SubAgent — parent sees 1 tool, branch gets 7 private coder tools |
+
+## design principles
+
+- **protocol over implementation** — contracts first, fill in later
+- **explicit over implicit** — no hidden defaults, no magic wiring
+- **extendability over convenience** — the framework provides hooks, not opinions
+- **decoupling over integration** — harness doesn't know about tools; runtime doesn't know about orchestration
+- **minimal until proven otherwise** — add complexity when real needs emerge, not in anticipation
+
+## status
+
+early exploration. the architecture is solid, the abstractions are validated, but the surface is still forming.
+
+current focus:
+
+- building real agents to validate the abstractions
+- discovering practical limitations
+- refining the protocol boundaries
+- keeping it minimal until the picture is clear

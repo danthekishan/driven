@@ -4,7 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from driven.core.harness import HarnessState, StateManager
+from driven.core.protocols import HarnessState, StateManager
 from driven.core.schemas import BranchInfo, Message
 
 

@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable
 
-from driven.core.harness import CallTools, Controller, Llm
+from driven.core.protocols import Controller, Llm
+from driven.core.schemas import CallTools
 from driven.core.schemas import (
     AssistantFinalized,
     ControllerRequested,
@@ -19,7 +20,7 @@ from driven.core.schemas import (
 
 @dataclass
 class ToolCallingController(Controller):
-    async def stream_turn(
+    async def __call__(
         self,
         messages: list[Message],
         system: str,

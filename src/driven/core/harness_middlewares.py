@@ -1,11 +1,11 @@
-from driven.core.harness import HarnessContext, HarnessState, Middleware, Next
+from driven.core.harness import HarnessRuntime, HarnessState, Middleware, Next
 from driven.core.schemas import Message
 
 
 def compaction_step_middleware(
     max_messages: int = 20, keep_last: int = 12
 ) -> Middleware:
-    async def mw(state: HarnessState, ctx: HarnessContext, next: Next) -> HarnessState:
+    async def mw(state: HarnessState, ctx: HarnessRuntime, next: Next) -> HarnessState:
         new_state = await next(state, ctx)
         if new_state.done:
             return new_state
@@ -25,14 +25,14 @@ def compaction_step_middleware(
 
 
 def lifecycle_session_middleware(run_id: str | None = None) -> Middleware:
-    async def mw(state: HarnessState, ctx: HarnessContext, next: Next) -> HarnessState:
+    async def mw(state: HarnessState, ctx: HarnessRuntime, next: Next) -> HarnessState:
         return await next(state, ctx)
 
     return mw
 
 
 def lifecycle_step_middleware() -> Middleware:
-    async def mw(state: HarnessState, ctx: HarnessContext, next: Next) -> HarnessState:
+    async def mw(state: HarnessState, ctx: HarnessRuntime, next: Next) -> HarnessState:
         return await next(state, ctx)
 
     return mw
@@ -43,7 +43,7 @@ def max_steps_middleware(
 ) -> Middleware:
     async def mw(
         state: HarnessState,
-        ctx: HarnessContext,
+        ctx: HarnessRuntime,
         next: Next,
     ) -> HarnessState:
         if state.step >= max_steps:

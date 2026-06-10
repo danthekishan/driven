@@ -98,7 +98,7 @@ class TraceSink(Protocol):
 
 
 @dataclass
-class HarnessContext:
+class HarnessRuntime:
     state_manager: StateManager
     controller: Controller
     runtime: Runtime

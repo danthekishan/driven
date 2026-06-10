@@ -5,7 +5,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, ToolParam
 from anthropic.types.message import Message as AnthropicMessage
 
-from driven.core.harness import Llm
+from driven.core.protocols import Llm
 from driven.core.schemas import (
     LlmInput,
     LlmOutput,

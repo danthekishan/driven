@@ -1,14 +1,7 @@
 from typing import Optional
 
-from driven.core.harness import (
-    Controller,
-    Emitter,
-    Harness,
-    HarnessState,
-    Llm,
-    Middlewares,
-    StateManager,
-)
+from driven.core.protocols import Controller, Emitter, Llm, StateManager
+from driven.core.harness import Harness, HarnessState, Middlewares
 from driven.core.tool_runtime import Extension
 from driven.core.schemas import Message
 
@@ -39,7 +32,7 @@ class Agent:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        await self.harness.disconnect()
+        await self.harness.disconnect(exc_type, exc, tb)
 
     async def run(
         self,

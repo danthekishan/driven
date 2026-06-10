@@ -29,27 +29,27 @@ from driven.core.protocols import (
     Llm,
     Controller,
     StateManager,
-    HarnessContext,
+    HarnessRuntime,
 )
 from driven.core.tool_runtime import Extension, ToolRuntime
 
 
-type Next = Callable[[HarnessState, HarnessContext], Awaitable[HarnessState]]
+type Next = Callable[[HarnessState, HarnessRuntime], Awaitable[HarnessState]]
 
 
 class Middleware(Protocol):
     async def __call__(
-        self, state: HarnessState, ctx: HarnessContext, next: Next
+        self, state: HarnessState, ctx: HarnessRuntime, next: Next
     ) -> HarnessState: ...
 
 
 type Middlewares = list[Middleware]
 
 
-def wrap_middleware(middlware: Middleware, next: Next) -> Next:
+def wrap_middleware(middleware: Middleware, next: Next) -> Next:
     @wraps(next)
-    async def wrapped(state: HarnessState, ctx: HarnessContext) -> HarnessState:
-        return await middlware(state, ctx, next)
+    async def wrapped(state: HarnessState, ctx: HarnessRuntime) -> HarnessState:
+        return await middleware(state, ctx, next)
 
     return wrapped
 
@@ -64,7 +64,7 @@ def build_chain(middlewares: Middlewares, handler: Next) -> Next:
 
 
 async def _emit(
-    ctx: HarnessContext, state: HarnessState, name: str, payload: dict[str, Any]
+    ctx: HarnessRuntime, state: HarnessState, name: str, payload: dict[str, Any]
 ):
     if not ctx.emitter:
         return
@@ -246,7 +246,7 @@ def _trace_records_from_event(
             return []
 
 
-async def _run(state: HarnessState, ctx: HarnessContext) -> HarnessState:
+async def _run(state: HarnessState, ctx: HarnessRuntime) -> HarnessState:
     state.step += 1
 
     async for event in ctx.run_controller(state=state):
@@ -273,7 +273,7 @@ def build_harness_runner(
 ):
     step_runner = build_chain(step_middlewares, _run)
 
-    async def _session_loop(state: HarnessState, ctx: HarnessContext) -> HarnessState:
+    async def _session_loop(state: HarnessState, ctx: HarnessRuntime) -> HarnessState:
         while not state.done:
             state = await step_runner(state, ctx)
 
@@ -286,7 +286,7 @@ async def run_harness(
     system: str,
     prompt: str | list[Message],
     state: HarnessState,
-    ctx: HarnessContext,
+    ctx: HarnessRuntime,
     session_runner: Next,
     emit_metadata: Optional[dict] = None,
 ) -> tuple[Optional[HarnessState], Optional[Exception]]:
@@ -336,7 +336,7 @@ async def run_harness(
 
 
 def spawn_harness_runner(
-    ctx: HarnessContext, middlewares: Middlewares, session_middlewares: Middlewares
+    ctx: HarnessRuntime, middlewares: Middlewares, session_middlewares: Middlewares
 ):
     session_runner = build_harness_runner(middlewares, session_middlewares)
 
@@ -362,7 +362,7 @@ def spawn_harness_runner(
 def spawn_branch_harness_runner(
     label: str,
     parent_state: HarnessState,
-    ctx: HarnessContext,
+    ctx: HarnessRuntime,
     middlewares: Middlewares,
     session_middlewares: Middlewares,
     private_of: Optional[str],
@@ -377,7 +377,7 @@ def spawn_branch_harness_runner(
     )
     parent_state.branches.append(branch_info)
 
-    branch_ctx = HarnessContext(
+    branch_ctx = HarnessRuntime(
         state_manager=ctx.state_manager,
         controller=ctx.controller,
         runtime=ctx.runtime,
@@ -429,7 +429,7 @@ class Harness:
             retry_delay=retry_delay,
         )
 
-        self.ctx = HarnessContext(
+        self.ctx = HarnessRuntime(
             state_manager=state_manager,
             controller=controller,
             runtime=runtime,
@@ -442,7 +442,7 @@ class Harness:
         )
 
     async def connect(self):
-        async def _create_branch(
+        def _create_branch(
             label: str,
             parent_state: HarnessState,
             middlewares: Middlewares,
@@ -465,7 +465,7 @@ class Harness:
 
     async def disconnect(self, *args, **kwargs):
         self.ctx._connected = False
-        await self.ctx.runtime.disconnect()
+        await self.ctx.runtime.disconnect(*args, **kwargs)
 
     async def run(
         self, system: str, prompt: str | list[Message], state_id: Optional[str] = None
