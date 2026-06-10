@@ -6,22 +6,20 @@ a protocol-driven agent orchestration framework for building LLM-powered tool-us
 
 driven is a framework — not an agent, not a runtime, not a set of tools.
 
-it provides the orchestration layer: protocols, schemas, a composable execution model, and a wiring mechanism. you bring the LLM, the tools, the state strategy, and the control logic. driven runs them.
-
 ## what driven provides
 
-| component                 | what it is                                                               |
-| ------------------------- | ------------------------------------------------------------------------ |
-| `Agent`                   | wiring layer — composes harness, extensions, controller, state, middlewares |
+| component                 | what it is                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------- |
+| `Agent`                   | wiring layer — composes harness, extensions, controller, state, middlewares           |
 | `Harness`                 | execution loop — runs turns, applies middlewares, manages lifecycle, owns ToolRuntime |
-| `ToolRuntime`             | manages extension lifecycle, registration, tool discovery, and execution |
-| `Controller` (protocol)   | decides what happens next in a turn                                      |
-| `StateManager` (protocol) | persists and recovers state                                              |
-| `Llm` (protocol)          | talks to a language model                                                |
-| `Emitter` (protocol)      | observes events                                                          |
-| `Extension` / `@tool()`   | base class and decorator for building tool groups                        |
-| `SubAgent`                | extension that spawns branches with private tools                        |
-| middlewares               | intercept hooks for compaction, limits, retries, logging, etc.           |
+| `ToolRuntime`             | manages extension lifecycle, registration, tool discovery, and execution              |
+| `Controller` (protocol)   | decides what happens next in a turn                                                   |
+| `StateManager` (protocol) | persists and recovers state                                                           |
+| `Llm` (protocol)          | talks to a language model                                                             |
+| `Emitter` (protocol)      | observes events                                                                       |
+| `Extension` / `@tool()`   | base class and decorator for building tool groups                                     |
+| `SubAgent`                | extension that spawns branches with private tools                                     |
+| middlewares               | intercept hooks for compaction, limits, retries, logging, etc.                        |
 
 Using `Extension` base class and `@tool()` decorator to define custom tools:
 
@@ -91,38 +89,6 @@ class CodingAgent(SubAgent):
 
 branch events carry metadata (`branch_id`, `parent_run_id`, `parent_step`, `label`) so you can trace the hierarchy.
 
-## architecture
-
-```
-                    ┌─────────────┐
-                    │    Agent    │  wiring — you compose this
-                    └──────┬──────┘
-                           │
-                    ┌──────┴──────┐
-                    │   Harness   │  execution loop — driven owns this
-                    └──────┬──────┘
-                           │
-              ┌────────────┼───────────┐
-              │            │           │
-        ┌─────┴─────┐ ┌────┴───┐ ┌─────┴──────┐
-        │ Controller │ │  Llm  │ │ ToolRuntime │
-        └───────────┘ └────────┘ └─────┬──────┘
-                                       │
-                              ┌────────┴────────┐
-                              │   Extensions    │  you own these
-                              └────────┬────────┘
-                                       │
-                              ┌────────┴──────────┐
-                              │  SubAgent (branch)│  private tools, own state
-                              └───────────────────┘
-```
-
-### harness
-
-the execution engine. it runs a loop: ask the controller for a turn, process events, update state, repeat until done.
-
-middleware chains wrap the loop — step-level and session-level — giving you hooks for compaction, limits, logging, retries, or anything else without touching core logic.
-
 ### tool runtime
 
 the boundary between the harness and the outside world. discovers available tools and executes them.
@@ -169,22 +135,3 @@ uv run python examples/main.py --name coding-agent
 | -------------- | ------------------------------------------------------------------------------ |
 | `number-guess` | agent plays a game using `NumberGuessExtension` tools directly                 |
 | `coding-agent` | `CodingAgent` SubAgent — parent sees 1 tool, branch gets 7 private coder tools |
-
-## design principles
-
-- **protocol over implementation** — contracts first, fill in later
-- **explicit over implicit** — no hidden defaults, no magic wiring
-- **extendability over convenience** — the framework provides hooks, not opinions
-- **decoupling over integration** — harness doesn't know about tools; runtime doesn't know about orchestration
-- **minimal until proven otherwise** — add complexity when real needs emerge, not in anticipation
-
-## status
-
-early exploration. the architecture is solid, the abstractions are validated, but the surface is still forming.
-
-current focus:
-
-- building real agents to validate the abstractions
-- discovering practical limitations
-- refining the protocol boundaries
-- keeping it minimal until the picture is clear
