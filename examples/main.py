@@ -5,12 +5,11 @@ import os
 from dotenv import load_dotenv
 
 from driven.agent import Agent, InMemoryStateManager, ToolCallingController
-from driven.core.harness import Emitter
+from driven.core.protocols import Emitter
 from driven.core.harness_middlewares import (
     compaction_step_middleware,
     max_steps_middleware,
 )
-from driven.core.tool_runtime import ExtensionRegistry
 from driven.llm_providers.openai import OpenAILlm
 
 from guess import NumberGuessExtension
@@ -18,7 +17,7 @@ from coding_agent import CodingAgent
 
 
 class PrintEmitter(Emitter):
-    async def emit(self, event: dict) -> None:
+    async def __call__(self, event: dict) -> None:
         source = event.get("source", "unknown")
         name = event.get("name", "event")
         payload = event.get("payload", {})
@@ -62,7 +61,7 @@ def _print_result(state, label="RESULT"):
 async def run_number_guess(api_key: str):
     async with Agent(
         llm=OpenAILlm(model="gpt-4.1-mini", api_key=api_key),
-        runtime=ExtensionRegistry(exts=[NumberGuessExtension()]),
+        extensions=[NumberGuessExtension()],
         controller=ToolCallingController(),
         state_manager=InMemoryStateManager(),
         middlewares=[
@@ -73,7 +72,7 @@ async def run_number_guess(api_key: str):
     ) as agent:
         state, error = await agent.run(
             prompt="Play the number guessing game. Start a new game and find the number.",
-            run_id="run-guess",
+            state_id="run-guess",
         )
 
         if error:
@@ -86,7 +85,7 @@ async def run_number_guess(api_key: str):
 async def run_coding_agent(api_key: str):
     async with Agent(
         llm=OpenAILlm(model="gpt-4.1-mini", api_key=api_key),
-        runtime=ExtensionRegistry(exts=[CodingAgent()]),
+        extensions=[CodingAgent()],
         controller=ToolCallingController(),
         state_manager=InMemoryStateManager(),
         middlewares=[
@@ -97,7 +96,7 @@ async def run_coding_agent(api_key: str):
     ) as agent:
         state, error = await agent.run(
             prompt="Create a fibonacci.py that computes the 10th fibonacci number, then run it.",
-            run_id="run-coding-agent",
+            state_id="run-coding-agent",
         )
 
         if error:

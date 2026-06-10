@@ -7,9 +7,9 @@ from driven.core.harness import (
     HarnessState,
     Llm,
     Middlewares,
-    Runtime,
     StateManager,
 )
+from driven.core.tool_runtime import Extension
 from driven.core.schemas import Message
 
 
@@ -17,24 +17,21 @@ class Agent:
     def __init__(
         self,
         llm: Llm,
-        runtime: Runtime,
+        extensions: list[Extension],
         controller: Controller,
         state_manager: StateManager,
-        middlewares: Middlewares = [],
-        session_middlewares: Middlewares = [],
+        middlewares: Optional[Middlewares] = None,
+        session_middlewares: Optional[Middlewares] = None,
         emitter: Optional[Emitter] = None,
     ):
-        self.middlewares = middlewares
-        self.session_middlewares = session_middlewares
-
         self.harness = Harness(
             llm=llm,
-            runtime=runtime,
+            extensions=extensions,
             controller=controller,
             state_manager=state_manager,
             emitter=emitter,
-            step_middlewares=self.middlewares,
-            session_middlewares=self.session_middlewares,
+            step_middlewares=middlewares or [],
+            session_middlewares=session_middlewares or [],
         )
 
     async def __aenter__(self):

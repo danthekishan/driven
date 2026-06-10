@@ -1,8 +1,6 @@
-from typing import Optional
-
 from pydantic import BaseModel
 
-from driven.core.harness import HarnessState, SpawnBranch
+from driven.core.protocols import HarnessState
 from driven.core.tool import tool
 from driven.core.tool_runtime import SubAgent
 from coder import CoderExtension
@@ -22,21 +20,15 @@ class CodingAgent(SubAgent):
         self,
         input: CodeTaskInput,
         state: HarnessState,
-        spawn_branch: Optional[SpawnBranch] = None,
     ) -> dict:
-        if spawn_branch is None:
-            raise RuntimeError("spawn_branch not available in runtime context")
-
         branch_state, error = await self.branch(
-            spawn_branch=spawn_branch,
-            parent_state=state,
             prompt=input.task,
             system=(
                 "You are a coding agent. "
                 "Perform the requested coding task using the available tools. "
                 "When done, summarize what you did."
             ),
-            middlewares=[],
+            parent_state=state,
         )
 
         if error:

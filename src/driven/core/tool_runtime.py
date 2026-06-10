@@ -1,7 +1,7 @@
 import asyncio
 from typing import Callable, Optional
 
-from driven.core.protocols import Emitter, HarnessContext, HarnessState, Llm
+from driven.core.protocols import Emitter, HarnessState, Llm
 
 from driven.core.schemas import LlmToolFunction, Message, ToolCall, ToolResult
 from driven.core.tool import RegisteredTool, Tool, discover_tools
@@ -30,23 +30,23 @@ class Extension:
 
     async def branch(
         self,
-        parent_state: HarnessState,
         prompt: str | list[Message],
+        system: str,
+        parent_state: HarnessState,
         label: str = "",
-        system: str = "",
         middlewares: list | None = None,
         session_middlewares: list | None = None,
     ) -> tuple:
         if self._create_branch is None:
             raise RuntimeError("branch not available — harness not connected")
-        return await self._create_branch(
-            parent_state=parent_state,
-            prompt=prompt,
+        runner = self._create_branch(
             label=label or self.name,
-            system=system,
+            parent_state=parent_state,
             middlewares=middlewares or [],
             session_middlewares=session_middlewares or [],
         )
+
+        return await runner(prompt=prompt, system=system)
 
 
 class SubAgent(Extension):
@@ -91,24 +91,23 @@ class SubAgent(Extension):
 
     async def branch(
         self,
-        parent_state: HarnessState,
         prompt: str | list[Message],
+        system: str,
+        parent_state: HarnessState,
         label: str = "",
-        system: str = "",
         middlewares: list | None = None,
         session_middlewares: list | None = None,
     ) -> tuple:
         if self._create_branch is None:
             raise RuntimeError("branch not available — harness not connected")
-        return await self._create_branch(
-            parent_state=parent_state,
-            prompt=prompt,
+        runner = self._create_branch(
             label=label or self.name,
-            system=system,
+            parent_state=parent_state,
             middlewares=middlewares or [],
             session_middlewares=session_middlewares or [],
             private_of=self.name,
         )
+        return await runner(prompt=prompt, system=system)
 
 
 class ToolRuntime:
@@ -125,10 +124,6 @@ class ToolRuntime:
         self.max_start_attempts = max_start_attempts
         self.retry_delay = retry_delay
         self._tg: asyncio.TaskGroup | None = None
-        self._ctx: Optional[HarnessContext] = None
-
-    def set_ctx(self, ctx: HarnessContext):
-        self._ctx = ctx
 
     async def connect(self, create_branch: Callable):
         self._tg = asyncio.TaskGroup()
@@ -158,7 +153,7 @@ class ToolRuntime:
     def _register_tools(self, extension: Extension):
         for local_name, tool_obj in extension.tools.items():
             full_name = f"{extension.name}-{local_name}"
-            self.tools[full_name] = RegisteredTool(extension_name, tool_obj)
+            self.tools[full_name] = RegisteredTool(extension.name, tool_obj)
 
         if isinstance(extension, SubAgent):
             self._private[extension.name] = {}
