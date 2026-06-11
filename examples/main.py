@@ -2,7 +2,14 @@ import argparse
 import asyncio
 import os
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    raise RuntimeError(
+        "dotenv support not installed."
+        "Either add it, or for examples install all"
+        "Install with: pip install driven[all]"
+    )
 
 from driven import Agent, Emitter, compaction_step_middleware, max_steps_middleware
 from driven.llm_providers import OpenAILlm

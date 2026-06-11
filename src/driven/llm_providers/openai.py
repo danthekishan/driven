@@ -1,7 +1,13 @@
 import json
 from typing import AsyncIterator, Optional
 
-from openai import AsyncOpenAI
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    raise RuntimeError(
+        "OpenAI support not installed. "
+        "Install with: pip install driven[openai]"
+    )
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,

@@ -1,7 +1,13 @@
 import json
 from typing import AsyncIterator, Optional
 
-from anthropic import AsyncAnthropic
+try:
+    from anthropic import AsyncAnthropic
+except ImportError:
+    raise RuntimeError(
+        "Anthropic support not installed. "
+        "Install with: pip install driven[anthropic]"
+    )
 from anthropic.types import MessageParam, ToolParam
 from anthropic.types.message import Message as AnthropicMessage
 
