@@ -2,8 +2,7 @@ import asyncio
 from typing import Callable, Optional
 
 from driven.core.protocols import Emitter, HarnessState, Llm
-
-from driven.core.schemas import LlmToolFunction, Message, ToolCall, ToolResult
+from driven.core.schemas import LlmToolFunction, Message, RunOpts, ToolCall, ToolResult
 from driven.core.tool import RegisteredTool, Tool, discover_tools
 
 
@@ -27,26 +26,6 @@ class Extension:
 
     async def stop(self):
         pass
-
-    async def branch(
-        self,
-        prompt: str | list[Message],
-        system: str,
-        parent_state: HarnessState,
-        label: str = "",
-        middlewares: list | None = None,
-        session_middlewares: list | None = None,
-    ) -> tuple:
-        if self._create_branch is None:
-            raise RuntimeError("branch not available — harness not connected")
-        runner = self._create_branch(
-            label=label or self.name,
-            parent_state=parent_state,
-            middlewares=middlewares or [],
-            session_middlewares=session_middlewares or [],
-        )
-
-        return await runner(prompt=prompt, system=system)
 
 
 class SubAgent(Extension):
@@ -94,20 +73,20 @@ class SubAgent(Extension):
         prompt: str | list[Message],
         system: str,
         parent_state: HarnessState,
-        label: str = "",
-        middlewares: list | None = None,
+        run_options: Optional[RunOpts] = None,
+        step_middlewares: list | None = None,
         session_middlewares: list | None = None,
     ) -> tuple:
         if self._create_branch is None:
             raise RuntimeError("branch not available — harness not connected")
         runner = self._create_branch(
-            label=label or self.name,
+            label=self.name,
             parent_state=parent_state,
-            middlewares=middlewares or [],
+            step_middlewares=step_middlewares,
             session_middlewares=session_middlewares or [],
             private_of=self.name,
         )
-        return await runner(prompt=prompt, system=system)
+        return await runner(prompt=prompt, system=system, run_options=run_options)
 
 
 class ToolRuntime:

@@ -26,7 +26,9 @@ class AnthropicLlm(Llm):
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         max_tokens: int = 4096,
+        name: Optional[str] = None,
     ):
+        self.name = name or f"anthropic:{model}"
         self.model = model
         self.max_tokens = max_tokens
         self.client = AsyncAnthropic(api_key=api_key, base_url=base_url)

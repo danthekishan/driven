@@ -4,13 +4,8 @@ import os
 
 from dotenv import load_dotenv
 
-from driven.agent import Agent, InMemoryStateManager, ToolCallingController
-from driven.core.protocols import Emitter
-from driven.core.harness_middlewares import (
-    compaction_step_middleware,
-    max_steps_middleware,
-)
-from driven.llm_providers.openai import OpenAILlm
+from driven import Agent, Emitter, compaction_step_middleware, max_steps_middleware
+from driven.llm_providers import OpenAILlm
 
 from guess import NumberGuessExtension
 from coding_agent import CodingAgent
@@ -41,7 +36,7 @@ def _print_result(state, label="RESULT"):
         print(
             "BRANCH:",
             state.branch.branch_id,
-            f"(parent: {state.branch.parent_run_id}, step: {state.branch.parent_step})",
+            f"(parent: {state.branch.parent_state_id}, step: {state.branch.parent_step})",
         )
 
     if state.branches:
@@ -60,10 +55,8 @@ def _print_result(state, label="RESULT"):
 
 async def run_number_guess(api_key: str):
     async with Agent(
-        llm=OpenAILlm(model="gpt-4.1-mini", api_key=api_key),
+        llms=[OpenAILlm(model="gpt-4.1-mini", api_key=api_key)],
         extensions=[NumberGuessExtension()],
-        controller=ToolCallingController(),
-        state_manager=InMemoryStateManager(),
         middlewares=[
             max_steps_middleware(20),
             compaction_step_middleware(),
@@ -84,10 +77,8 @@ async def run_number_guess(api_key: str):
 
 async def run_coding_agent(api_key: str):
     async with Agent(
-        llm=OpenAILlm(model="gpt-4.1-mini", api_key=api_key),
+        llms=[OpenAILlm(model="gpt-4.1-mini", api_key=api_key)],
         extensions=[CodingAgent()],
-        controller=ToolCallingController(),
-        state_manager=InMemoryStateManager(),
         middlewares=[
             max_steps_middleware(20),
             compaction_step_middleware(),

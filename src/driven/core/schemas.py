@@ -108,7 +108,7 @@ class LlmOutput:
 @dataclass(frozen=True)
 class BranchInfo:
     branch_id: str
-    parent_run_id: str
+    parent_state_id: str
     parent_step: int
     spawned_at: float
     label: str = ""
@@ -300,3 +300,9 @@ TurnEvent = Union[
 ]
 
 CallTools = Callable[[list[ToolCall], Optional[float]], Awaitable[list[ToolResult]]]
+
+
+@dataclass
+class RunOpts:
+    llm: dict = field(default_factory=dict)
+

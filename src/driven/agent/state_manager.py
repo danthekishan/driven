@@ -25,12 +25,12 @@ class InMemoryStateManager(StateManager):
     def __init__(self):
         self._store: dict[str, HarnessState] = {}
 
-    async def load(self, run_id: str) -> HarnessState:
-        if run_id in self._store:
-            return self._store[run_id]
+    async def load(self, state_id: str) -> HarnessState:
+        if state_id in self._store:
+            return self._store[state_id]
 
-        state = HarnessState(state_id=run_id)
-        self._store[run_id] = state
+        state = HarnessState(state_id=state_id)
+        self._store[state_id] = state
         return state
 
     async def save(self, state: HarnessState) -> HarnessState:
@@ -51,7 +51,7 @@ class LocalStateManager(StateManager):
 
     def _state_path(self, state: HarnessState) -> Path:
         if state.branch:
-            return self.root_dir / state.branch.parent_run_id / "branches" / f"{state.state_id}.json"
+            return self.root_dir / state.branch.parent_state_id / "branches" / f"{state.state_id}.json"
         return self.root_dir / f"{state.state_id}.json"
 
     def _serialize(self, state: HarnessState) -> dict[str, Any]:
@@ -66,6 +66,7 @@ class LocalStateManager(StateManager):
             "internal": _to_json_safe(state.internal),
             "branch": asdict(state.branch) if state.branch else None,
             "branches": [asdict(b) for b in state.branches],
+            "extra": state.extra,
         }
 
     def _deserialize(self, payload: dict[str, Any]) -> HarnessState:
@@ -85,28 +86,29 @@ class LocalStateManager(StateManager):
             internal=payload.get("internal", {}),
             branch=branch,
             branches=branches,
+            extra=payload.get("extra", {}),
         )
 
-    async def load(self, run_id: str) -> HarnessState:
+    async def load(self, state_id: str) -> HarnessState:
         async with self._lock:
             for parent_dir in self.root_dir.iterdir():
-                branch_path = parent_dir / "branches" / f"{run_id}.json"
+                branch_path = parent_dir / "branches" / f"{state_id}.json"
                 if branch_path.exists():
                     raw = json.loads(branch_path.read_text())
                     state = self._deserialize(raw)
                     if not state.state_id:
-                        state.state_id = run_id
+                        state.state_id = state_id
                     return state
 
-            path = self.root_dir / f"{run_id}.json"
+            path = self.root_dir / f"{state_id}.json"
             if not path.exists():
-                return HarnessState(state_id=run_id)
+                return HarnessState(state_id=state_id)
 
             raw = json.loads(path.read_text())
             state = self._deserialize(raw)
 
             if not state.state_id:
-                state.state_id = run_id
+                state.state_id = state_id
 
             return state
 
@@ -122,15 +124,15 @@ class LocalStateManager(StateManager):
 
         return state
 
-    async def delete(self, run_id: str) -> None:
+    async def delete(self, state_id: str) -> None:
         async with self._lock:
-            path = self.root_dir / f"{run_id}.json"
+            path = self.root_dir / f"{state_id}.json"
             if path.exists():
                 path.unlink()
                 return
 
             for parent_dir in self.root_dir.iterdir():
-                branch_path = parent_dir / "branches" / f"{run_id}.json"
+                branch_path = parent_dir / "branches" / f"{state_id}.json"
                 if branch_path.exists():
                     branch_path.unlink()
                     return

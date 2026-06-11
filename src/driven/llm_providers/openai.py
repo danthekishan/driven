@@ -31,8 +31,10 @@ from driven.core.schemas import (
 
 class OpenAILlm(Llm):
     def __init__(
-        self, model: str, api_key: Optional[str] = None, base_url: Optional[str] = None
+        self, model: str, api_key: Optional[str] = None, base_url: Optional[str] = None,
+        name: Optional[str] = None,
     ):
+        self.name = name or f"openai:{model}"
         self.model = model
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 

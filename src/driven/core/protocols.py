@@ -18,6 +18,7 @@ from driven.core.schemas import (
     LlmTextResponse,
     LlmToolFunction,
     Message,
+    RunOpts,
     ToolCall,
     ToolResult,
     TraceRecord,
@@ -38,6 +39,7 @@ class HarnessState:
     internal: dict[str, Any] = field(default_factory=dict)
     branch: Optional[BranchInfo] = None
     branches: list[BranchInfo] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -47,6 +49,8 @@ class Emitter(Protocol):
 
 @runtime_checkable
 class Llm(Protocol):
+    name: str
+
     async def generate_text(self, request: LlmInput) -> LlmTextResponse: ...
     async def generate_structured(
         self, request: LlmInput, schema: dict
@@ -88,7 +92,7 @@ class Controller(Protocol):
 
 @runtime_checkable
 class StateManager(Protocol):
-    async def load(self, run_id: str) -> HarnessState: ...
+    async def load(self, state_id: str) -> HarnessState: ...
     async def save(self, state: HarnessState) -> HarnessState: ...
 
 
@@ -102,17 +106,39 @@ class HarnessRuntime:
     state_manager: StateManager
     controller: Controller
     runtime: Runtime
-    llm: Llm
+    llms: dict[str, Llm] = field(default_factory=dict)
+    default_llm: str = ""
     emitter: Optional[Emitter] = None
     trace_sink: Optional[TraceSink] = None
     private_of: Optional[str] = None
     _connected: bool = field(default=False, init=False)
+    run_options: RunOpts = field(default_factory=RunOpts)
 
     def _require_connected(self):
         if not self._connected:
+            raise RuntimeError("runtime not connected — call start() first")
+
+    def get_llm(self) -> Llm:
+        key = self.run_options.llm.get("name") or self.default_llm
+        if key not in self.llms:
             raise RuntimeError(
-                "runtime not connected — enter harness as context manager first"
+                f"llm '{key}' not found — available: {list(self.llms.keys())}"
             )
+        return self.llms[key]
+
+    def _copy_run_options(self) -> RunOpts:
+        return RunOpts(llm=dict(self.run_options.llm))
+
+    async def load_state(self, state_id: str):
+        state = await self.state_manager.load(state_id)
+        saved_opts = state.extra.get("run_options", {})
+        if saved_opts:
+            self.run_options = RunOpts(llm=saved_opts.get("llm", {}))
+        return state
+
+    async def save_state(self, state: HarnessState):
+        state.extra["run_options"] = {"llm": self.run_options.llm}
+        return await self.state_manager.save(state)
 
     async def call_tools(
         self,
@@ -120,10 +146,11 @@ class HarnessRuntime:
         tool_calls: list[ToolCall],
         timeout: Optional[float] = None,
     ) -> list[ToolResult]:
+        llm = self.get_llm()
         return await self.runtime.call_tools(
             tools=tool_calls,
             state=state,
-            llm=self.llm,
+            llm=llm,
             emitter=self.emitter,
             timeout=timeout,
         )
@@ -134,6 +161,8 @@ class HarnessRuntime:
         return self.runtime.get_tools(private_of=self.private_of)
 
     async def run_controller(self, state: HarnessState):
+        llm = self.get_llm()
+
         async def _call_tools(
             tool_calls: list[ToolCall], timeout: Optional[float] = None
         ):
@@ -144,6 +173,6 @@ class HarnessRuntime:
             system=state.system,
             get_tools=self.get_tools,
             call_tools=_call_tools,
-            llm=self.llm,
+            llm=llm,
         ):
             yield event

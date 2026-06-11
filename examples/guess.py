@@ -2,8 +2,7 @@ import random
 
 from pydantic import BaseModel
 
-from driven.core.tool import tool
-from driven.core.tool_runtime import Extension
+from driven import tool, Extension
 
 
 class GuessInput(BaseModel):

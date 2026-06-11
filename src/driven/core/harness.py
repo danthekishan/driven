@@ -1,3 +1,4 @@
+import asyncio
 from functools import wraps
 from dataclasses import asdict
 import time
@@ -17,6 +18,7 @@ from driven.core.schemas import (
     LlmOutputReceived,
     LlmRequestPrepared,
     Message,
+    RunOpts,
     ToolsCompleted,
     ToolsRequested,
     TraceRecord,
@@ -79,7 +81,7 @@ async def _emit(
     if state.branch:
         event["branch"] = {
             "branch_id": state.branch.branch_id,
-            "parent_run_id": state.branch.parent_run_id,
+            "parent_state_id": state.branch.parent_state_id,
             "parent_step": state.branch.parent_step,
             "label": state.branch.label,
         }
@@ -332,7 +334,7 @@ async def run_harness(
         return state, e
     finally:
         if state is not None:
-            await ctx.state_manager.save(state)
+            await ctx.save_state(state)
 
 
 def spawn_harness_runner(
@@ -340,12 +342,8 @@ def spawn_harness_runner(
 ):
     session_runner = build_harness_runner(middlewares, session_middlewares)
 
-    async def _runner(
-        system: str,
-        prompt: str | list[Message],
-        state_id: str,
-    ):
-        state = await ctx.state_manager.load(state_id)
+    async def _runner(system: str, prompt: str | list[Message], state_id: str):
+        state = await ctx.load_state(state_id)
 
         return await run_harness(
             system=system,
@@ -363,14 +361,14 @@ def spawn_branch_harness_runner(
     label: str,
     parent_state: HarnessState,
     ctx: HarnessRuntime,
-    middlewares: Middlewares,
+    step_middlewares: Middlewares,
     session_middlewares: Middlewares,
     private_of: Optional[str],
 ):
     branch_id = f"{parent_state.state_id}::{label or str(uuid4())}"
     branch_info = BranchInfo(
         branch_id=branch_id,
-        parent_run_id=parent_state.state_id,
+        parent_state_id=parent_state.state_id,
         parent_step=parent_state.step,
         spawned_at=time.time(),
         label=label,
@@ -381,17 +379,25 @@ def spawn_branch_harness_runner(
         state_manager=ctx.state_manager,
         controller=ctx.controller,
         runtime=ctx.runtime,
-        llm=ctx.llm,
+        llms=ctx.llms,
+        default_llm=ctx.default_llm,
         emitter=ctx.emitter,
         trace_sink=ctx.trace_sink,
         private_of=private_of,
+        run_options=ctx.run_options,
     )
 
-    session_runner = build_harness_runner(middlewares, session_middlewares)
+    session_runner = build_harness_runner(step_middlewares, session_middlewares)
 
-    async def _runner(system: str, prompt: str | list[Message]):
-        branch_state = await branch_ctx.state_manager.load(branch_id)
+    async def _runner(
+        system: str, prompt: str | list[Message], run_options: Optional[RunOpts] = None
+    ):
+        branch_state = await branch_ctx.load_state(branch_id)
         branch_state.branch = branch_info
+        if run_options:
+            branch_ctx.run_options = RunOpts(
+                llm={**branch_ctx.run_options.llm, **run_options.llm}
+            )
         return await run_harness(
             system=system,
             prompt=prompt,
@@ -401,7 +407,7 @@ def spawn_branch_harness_runner(
             emit_metadata={
                 "branch": True,
                 "label": label,
-                "parent_run_id": parent_state.state_id,
+                "parent_state_id": parent_state.state_id,
                 "parent_step": parent_state.step,
             },
         )
@@ -412,16 +418,20 @@ def spawn_branch_harness_runner(
 class Harness:
     def __init__(
         self,
-        llm: Llm,
+        llms: dict[str, Llm],
+        default_llm: str,
         extensions: list[Extension],
         controller: Controller,
         state_manager: StateManager,
         step_middlewares: Middlewares,
         session_middlewares: Middlewares,
+        branch_step_middlewares: Optional[Middlewares] = None,
+        run_options: Optional[RunOpts] = None,
         emitter: Optional[Emitter] = None,
         max_start_attempts: int = 3,
         retry_delay: float = 2.0,
     ):
+        self._branch_step_middlewares = branch_step_middlewares or []
 
         runtime = ToolRuntime(
             exts=extensions,
@@ -433,28 +443,37 @@ class Harness:
             state_manager=state_manager,
             controller=controller,
             runtime=runtime,
-            llm=llm,
+            llms=llms,
+            default_llm=default_llm,
             emitter=emitter,
+            run_options=run_options or RunOpts(),
         )
 
         self.harness_runner = spawn_harness_runner(
             self.ctx, step_middlewares, session_middlewares
         )
 
+        self._run_task: Optional[asyncio.Task] = None
+
     async def connect(self):
         def _create_branch(
             label: str,
             parent_state: HarnessState,
-            middlewares: Middlewares,
-            session_middlewares: Middlewares,
-            private_of: Optional[str],
+            step_middlewares: Optional[Middlewares] = None,
+            session_middlewares: Middlewares = [],
+            private_of: Optional[str] = None,
         ):
             self.ctx._require_connected()
+            _middlewares = (
+                step_middlewares
+                if step_middlewares is not None
+                else self._branch_step_middlewares
+            )
             return spawn_branch_harness_runner(
                 label,
                 parent_state,
                 self.ctx,
-                middlewares,
+                _middlewares,
                 session_middlewares,
                 private_of,
             )
@@ -468,8 +487,29 @@ class Harness:
         await self.ctx.runtime.disconnect(*args, **kwargs)
 
     async def run(
-        self, system: str, prompt: str | list[Message], state_id: Optional[str] = None
+        self,
+        system: str,
+        prompt: str | list[Message],
+        state_id: Optional[str] = None,
+        run_options: Optional[RunOpts] = None,
     ) -> tuple[Optional[HarnessState], Optional[Exception]]:
         self.ctx._require_connected()
         _state_id = state_id or str(uuid4())
-        return await self.harness_runner(system, prompt, _state_id)
+        self._run_task = asyncio.current_task()
+
+        original = self.ctx._copy_run_options()
+        try:
+            if run_options:
+                self.ctx.run_options = RunOpts(
+                    llm={**self.ctx.run_options.llm, **run_options.llm}
+                )
+            return await self.harness_runner(system, prompt, _state_id)
+        except asyncio.CancelledError:
+            return None, None
+        finally:
+            self._run_task = None
+            self.ctx.run_options = original
+
+    def cancel(self):
+        if self._run_task and not self._run_task.done():
+            self._run_task.cancel()
